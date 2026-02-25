@@ -1,0 +1,33 @@
+# Build artifacts
+bin/
+dist/
+
+# Go binary outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage
+coverage.*
+
+# Logs and temp files
+*.log
+tmp/
+.cache/
+
+# Environment files
+.env
+.env.*
+
+# Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local exploration repos and data
+external/

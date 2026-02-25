@@ -165,12 +165,13 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 	}
 
 	type target struct {
-		tool    ToolName
-		paths   ToolPaths
-		adapter Adapter
-		state   StateFile
-		action  string
-		cred    Credential
+		tool        ToolName
+		paths       ToolPaths
+		adapter     Adapter
+		state       StateFile
+		action      string
+		cred        Credential
+		materialize bool
 	}
 
 	targets := make([]target, 0, len(tools))
@@ -204,6 +205,15 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 		cred, err := loadProfile(paths, profile)
 		if err != nil {
 			if os.IsNotExist(err) {
+				activeCred, hasActiveCred, activeErr := adapter.ReadActiveCredential(paths)
+				if activeErr != nil && !os.IsNotExist(activeErr) {
+					return nil, WrapExit(ExitIOFailure, activeErr)
+				}
+				canMaterialize := hasActiveCred && activeCred.Access != "" && activeCred.Refresh != ""
+				if canMaterialize && state.PendingCreateProfile == profile {
+					targets = append(targets, target{tool: tool, paths: paths, adapter: adapter, state: state, action: "switch", cred: activeCred, materialize: true})
+					continue
+				}
 				if opts.CreateMissing {
 					targets = append(targets, target{tool: tool, paths: paths, adapter: adapter, state: state, action: "prepare"})
 				} else {
@@ -299,6 +309,13 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 			}
 		}
 
+		if t.materialize {
+			if err := saveProfile(t.paths, profile, t.cred, true); err != nil {
+				s.rollback(rollback)
+				return nil, WrapExit(ExitIOFailure, err)
+			}
+		}
+
 		status := "switched"
 		pendingCreate := false
 		if t.action == "switch" {
@@ -370,9 +387,6 @@ func sortSwitchResults(results []SwitchResult) {
 func chooseSnapshotProfile(state StateFile, target string) string {
 	if state.ActiveProfile != "" && state.ActiveProfile != target {
 		return state.ActiveProfile
-	}
-	if state.ActiveProfile == target && state.PreviousProfile != "" {
-		return state.PreviousProfile
 	}
 	return "__last__"
 }

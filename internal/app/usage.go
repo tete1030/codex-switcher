@@ -98,8 +98,8 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 
 		for _, name := range profilesToLoad {
 			preferredActiveProfile := ""
-			if defaultActiveQuery && name == "__active__" && state.ActiveProfile != "" {
-				preferredActiveProfile = state.ActiveProfile
+			if defaultActiveQuery && name == "__active__" {
+				preferredActiveProfile = firstNonEmpty(state.ActiveProfile, state.PendingCreateProfile)
 			}
 
 			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name, preferredActiveProfile)
@@ -173,7 +173,13 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 				if refreshed {
 					synced = newCred
 				}
-				_ = saveProfile(paths, sourceLabel, synced, true)
+				targetProfile := sourceLabel
+				if targetProfile == unknownProfileName {
+					targetProfile = state.PendingCreateProfile
+				}
+				if targetProfile != "" && targetProfile != unknownProfileName {
+					_ = saveProfile(paths, targetProfile, synced, true)
+				}
 			}
 		}
 

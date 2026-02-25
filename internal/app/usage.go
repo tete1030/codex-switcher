@@ -43,6 +43,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 
 	httpClient := &http.Client{Timeout: defaultHTTPTimeout}
 	usageURL := firstNonEmpty(strings.TrimSpace(os.Getenv("CODEX_SWITCHER_USAGE_URL")), defaultUsageURL)
+	defaultActiveQuery := opts.Profile == "" && len(opts.Tools) == 0 && !opts.AllProfiles
 
 	results := make([]UsageResult, 0)
 	for _, tool := range tools {
@@ -96,7 +97,12 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 		lastSuccessProfile := ""
 
 		for _, name := range profilesToLoad {
-			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name)
+			preferredActiveProfile := ""
+			if defaultActiveQuery && name == "__active__" && state.ActiveProfile != "" {
+				preferredActiveProfile = state.ActiveProfile
+			}
+
+			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name, preferredActiveProfile)
 			if resolveErr != nil {
 				results = append(results, UsageResult{
 					Tool:     tool,
@@ -160,6 +166,14 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 					}
 					_ = adapter.WriteActiveCredential(paths, newCred)
 				}
+			}
+
+			if name == "__active__" && sourceLabel != unknownProfileName {
+				synced := cred
+				if refreshed {
+					synced = newCred
+				}
+				_ = saveProfile(paths, sourceLabel, synced, true)
 			}
 		}
 
@@ -227,10 +241,6 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 		return list, nil
 	}
 
-	state, err := loadState(paths)
-	if err == nil && state.ActiveProfile != "" {
-		return []string{state.ActiveProfile}, nil
-	}
 	return []string{"__active__"}, nil
 }
 
@@ -241,7 +251,7 @@ func usageProfileLabel(name string) string {
 	return name
 }
 
-func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string) (Credential, string, error) {
+func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string) (Credential, string, error) {
 	if name == "__active__" {
 		cred, ok, err := adapter.ReadActiveCredential(paths)
 		if err != nil {
@@ -249,6 +259,9 @@ func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string) (Cred
 		}
 		if !ok {
 			return Credential{}, unknownProfileName, fmt.Errorf("no active credential available")
+		}
+		if preferredActiveProfile != "" {
+			return cred, preferredActiveProfile, nil
 		}
 		if matched := guessActiveProfileName(paths, cred); matched != "" {
 			return cred, matched, nil

@@ -221,20 +221,25 @@ func newSwitchCommand(svc *app.Service) *cobra.Command {
 func newUsageCommand(svc *app.Service) *cobra.Command {
 	var profile string
 	var allProfiles bool
-	var sourceTool string
+	var toolsCSV string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Fetch usage for one or more profiles",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tool := app.ToolName(strings.ToLower(strings.TrimSpace(sourceTool)))
-			if tool != "" && tool != app.ToolCodex && tool != app.ToolOpenCode && tool != app.ToolOpenClaw {
-				return app.WrapExit(app.ExitUserError, fmt.Errorf("invalid --source-tool %q", sourceTool))
+			selectedTools := []app.ToolName{}
+			if strings.TrimSpace(toolsCSV) != "" {
+				parsed, err := app.ParseTools(toolsCSV)
+				if err != nil {
+					return app.WrapExit(app.ExitUserError, err)
+				}
+				selectedTools = parsed
 			}
+
 			results, err := svc.Usage(app.UsageOptions{
 				Profile:     strings.TrimSpace(profile),
 				AllProfiles: allProfiles,
-				SourceTool:  tool,
+				Tools:       selectedTools,
 			})
 			if err != nil {
 				return err
@@ -276,8 +281,8 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&profile, "profile", "", "Specific profile name")
-	cmd.Flags().BoolVar(&allProfiles, "all-profiles", false, "Query all profiles (source tool only if --source-tool is set)")
-	cmd.Flags().StringVar(&sourceTool, "source-tool", "", "Source tool (optional): codex|opencode|openclaw")
+	cmd.Flags().BoolVar(&allProfiles, "all-profiles", false, "Query all profiles (for selected tool(s), or all tools if none selected)")
+	cmd.Flags().StringVar(&toolsCSV, "tools", "", "Comma-separated tools: codex,opencode,openclaw")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
 	return cmd
 }

@@ -26,7 +26,7 @@ const (
 type UsageOptions struct {
 	Profile     string
 	AllProfiles bool
-	SourceTool  ToolName
+	Tools       []ToolName
 }
 
 func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
@@ -36,7 +36,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 		}
 	}
 
-	tools, err := resolveUsageTools(opts.SourceTool)
+	tools, err := resolveUsageTools(opts.Tools)
 	if err != nil {
 		return nil, WrapExit(ExitUserError, err)
 	}
@@ -187,14 +187,23 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 	return results, nil
 }
 
-func resolveUsageTools(source ToolName) ([]ToolName, error) {
-	if source == "" {
+func resolveUsageTools(selected []ToolName) ([]ToolName, error) {
+	if len(selected) == 0 {
 		return append([]ToolName{}, AllTools...), nil
 	}
-	if source != ToolCodex && source != ToolOpenCode && source != ToolOpenClaw {
-		return nil, fmt.Errorf("unsupported source tool %s", source)
+	tools := make([]ToolName, 0, len(selected))
+	seen := map[ToolName]struct{}{}
+	for _, tool := range selected {
+		if tool != ToolCodex && tool != ToolOpenCode && tool != ToolOpenClaw {
+			return nil, fmt.Errorf("unsupported tool %s", tool)
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		tools = append(tools, tool)
 	}
-	return []ToolName{source}, nil
+	return tools, nil
 }
 
 func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, error) {
@@ -202,7 +211,7 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 		return []string{opts.Profile}, nil
 	}
 
-	if opts.SourceTool != "" {
+	if len(opts.Tools) > 0 {
 		list, err := listProfiles(paths)
 		if err != nil {
 			return nil, err

@@ -333,9 +333,10 @@ func newProfilesDeleteCommand(svc *app.Service) *cobra.Command {
 	var toolCSV string
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "delete <profile>",
-		Short: "Delete profile files",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <profile>",
+		Aliases: []string{"remove", "rm"},
+		Short:   "Delete profile files",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tools, err := app.ParseTools(toolCSV)
 			if err != nil {

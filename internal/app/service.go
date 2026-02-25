@@ -410,7 +410,52 @@ func (s *Service) DeleteProfile(name string, tools []ToolName) error {
 		if err != nil {
 			return WrapExit(ExitIOFailure, err)
 		}
+
+		lock, err := acquireLock(paths.LockPath)
+		if err != nil {
+			return WrapExit(ExitIOFailure, err)
+		}
+
 		if err := deleteProfile(paths, name); err != nil {
+			_ = lock.Release()
+			return WrapExit(ExitIOFailure, err)
+		}
+
+		if tool == ToolOpenClaw {
+			if err := removeOpenClawRotaterProfile(paths, name); err != nil {
+				_ = lock.Release()
+				return WrapExit(ExitIOFailure, err)
+			}
+		}
+
+		state, err := loadState(paths)
+		if err != nil {
+			_ = lock.Release()
+			return WrapExit(ExitIOFailure, err)
+		}
+		changed := false
+		if state.ActiveProfile == name {
+			state.ActiveProfile = ""
+			changed = true
+		}
+		if state.PreviousProfile == name {
+			state.PreviousProfile = ""
+			changed = true
+		}
+		if state.PendingCreateProfile == name {
+			state.PendingCreateProfile = ""
+			state.PendingCreateSince = ""
+			changed = true
+		}
+		if changed {
+			state.LastSwitchAt = time.Now().UTC().Format(time.RFC3339)
+			if err := saveState(paths, state); err != nil {
+				_ = lock.Release()
+				return WrapExit(ExitIOFailure, err)
+			}
+		}
+
+		if err := lock.Release(); err != nil {
 			return WrapExit(ExitIOFailure, err)
 		}
 	}

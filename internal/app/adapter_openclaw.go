@@ -233,8 +233,46 @@ func writeOpenClawStore(path string, store openClawStore) error {
 	raw["profiles"] = store.Profiles
 	if len(store.Order) > 0 {
 		raw["order"] = store.Order
+	} else {
+		delete(raw, "order")
 	}
 	return writeJSONAtomic(path, raw)
+}
+
+func removeOpenClawRotaterProfile(paths ToolPaths, profileName string) error {
+	store, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if store.Profiles == nil {
+		store.Profiles = map[string]openClawCredential{}
+	}
+	if store.Order == nil {
+		store.Order = map[string][]string{}
+	}
+
+	targetID := "openai-codex:rotater:" + profileName
+	delete(store.Profiles, targetID)
+
+	if order, ok := store.Order["openai-codex"]; ok {
+		next := make([]string, 0, len(order))
+		for _, id := range order {
+			if id == targetID {
+				continue
+			}
+			next = append(next, id)
+		}
+		if len(next) == 0 {
+			delete(store.Order, "openai-codex")
+		} else {
+			store.Order["openai-codex"] = next
+		}
+	}
+
+	return writeOpenClawStore(paths.ActivePath, store)
 }
 
 func activeOpenClawOrder(store openClawStore) []string {

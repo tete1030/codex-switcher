@@ -36,12 +36,14 @@ func resolveToolPaths(tool ToolName) (ToolPaths, error) {
 			LockPath:   filepath.Join(root, "profiles", ".rotater.lock"),
 		}, nil
 	case ToolOpenClaw:
+		openClawHome := resolveOpenClawHome(home)
+		openClawStateDir := resolveOpenClawStateDir(openClawHome)
 		agentDir := firstNonEmpty(
 			strings.TrimSpace(os.Getenv("OPENCLAW_AGENT_DIR")),
 			strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")),
-			filepath.Join(home, ".openclaw", "agents", "main", "agent"),
+			filepath.Join(openClawStateDir, "agents", "main", "agent"),
 		)
-		root := resolvePathWithHome(agentDir, home)
+		root := resolvePathWithHome(agentDir, openClawHome)
 		return ToolPaths{
 			Tool:       tool,
 			RootDir:    root,
@@ -53,6 +55,29 @@ func resolveToolPaths(tool ToolName) (ToolPaths, error) {
 	default:
 		return ToolPaths{}, errors.New("unsupported tool")
 	}
+}
+
+func resolveOpenClawHome(fallbackHome string) string {
+	return resolvePathWithHome(
+		firstNonEmpty(
+			strings.TrimSpace(os.Getenv("OPENCLAW_HOME")),
+			strings.TrimSpace(os.Getenv("HOME")),
+			strings.TrimSpace(os.Getenv("USERPROFILE")),
+			fallbackHome,
+		),
+		fallbackHome,
+	)
+}
+
+func resolveOpenClawStateDir(openClawHome string) string {
+	stateOverride := firstNonEmpty(
+		strings.TrimSpace(os.Getenv("OPENCLAW_STATE_DIR")),
+		strings.TrimSpace(os.Getenv("CLAWDBOT_STATE_DIR")),
+	)
+	if stateOverride != "" {
+		return resolvePathWithHome(stateOverride, openClawHome)
+	}
+	return filepath.Join(openClawHome, ".openclaw")
 }
 
 func resolvePathWithHome(raw string, home string) string {

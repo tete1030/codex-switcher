@@ -191,9 +191,9 @@ func newSwitchCommand(svc *app.Service) *cobra.Command {
 				return nil
 			}
 			for _, item := range results {
-				mode := "switched"
+				mode := item.Status
 				if dryRun {
-					mode = "dry-run"
+					mode = mode + ", dry-run"
 				}
 				switch item.Status {
 				case "blocked", "skipped_missing":

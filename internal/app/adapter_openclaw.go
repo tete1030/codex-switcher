@@ -11,6 +11,8 @@ import (
 
 type openClawAdapter struct{}
 
+const openClawPendingLoginSentinelID = "openai-codex:rotater:__pending_login__"
+
 func (a *openClawAdapter) Tool() ToolName { return ToolOpenClaw }
 
 type openClawCredential struct {
@@ -123,16 +125,7 @@ func (a *openClawAdapter) ClearActiveCredential(paths ToolPaths) error {
 		store.Order = map[string][]string{}
 	}
 
-	for id, entry := range store.Profiles {
-		provider := strings.ToLower(strings.TrimSpace(entry.Provider))
-		if provider != "openai-codex" {
-			continue
-		}
-		if entry.Type == "oauth" || entry.Type == "token" {
-			delete(store.Profiles, id)
-		}
-	}
-	delete(store.Order, "openai-codex")
+	store.Order["openai-codex"] = []string{openClawPendingLoginSentinelID}
 
 	if store.Version == 0 {
 		store.Version = 1
@@ -168,6 +161,9 @@ func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, 
 	merged := []string{profileID}
 	for _, id := range existing {
 		if id == profileID {
+			continue
+		}
+		if id == openClawPendingLoginSentinelID {
 			continue
 		}
 		merged = append(merged, id)

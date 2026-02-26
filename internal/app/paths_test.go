@@ -1,6 +1,9 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveToolPathsOpenClawDefaultUsesHome(t *testing.T) {
 	t.Setenv("HOME", "/tmp/home-default")
@@ -79,5 +82,16 @@ func TestResolveToolPathsOpenClawAgentDirOverridesState(t *testing.T) {
 	want := "/tmp/direct-agent"
 	if paths.RootDir != want {
 		t.Fatalf("unexpected root dir: got %q, want %q", paths.RootDir, want)
+	}
+}
+
+func TestResolvePathWithHomeSupportsWindowsTildePrefix(t *testing.T) {
+	home := `C:\Users\alice`
+	got := resolvePathWithHome("~\\state\\agent", home)
+	if !strings.HasPrefix(got, home) {
+		t.Fatalf("expected path to start with home %q, got %q", home, got)
+	}
+	if !strings.Contains(got, "state\\agent") {
+		t.Fatalf("expected expanded suffix state\\agent, got %q", got)
 	}
 }

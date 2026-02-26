@@ -84,6 +84,9 @@ func resolvePathWithHome(raw string, home string) string {
 	if strings.HasPrefix(raw, "~/") {
 		return filepath.Join(home, strings.TrimPrefix(raw, "~/"))
 	}
+	if strings.HasPrefix(raw, "~\\") {
+		return filepath.Join(home, strings.TrimPrefix(raw, "~\\"))
+	}
 	if raw == "~" {
 		return home
 	}

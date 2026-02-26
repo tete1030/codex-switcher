@@ -95,6 +95,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 		state, _ := loadState(paths)
 		hadSuccess := false
 		lastSuccessProfile := ""
+		resolvedPendingProfile := false
 
 		for _, name := range profilesToLoad {
 			preferredActiveProfile := ""
@@ -102,7 +103,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 				preferredActiveProfile = firstNonEmpty(state.ActiveProfile, state.PendingCreateProfile)
 			}
 
-			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name, preferredActiveProfile)
+			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name, preferredActiveProfile, state.PendingCreateProfile)
 			if resolveErr != nil {
 				results = append(results, UsageResult{
 					Tool:     tool,
@@ -178,12 +179,16 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 					targetProfile = state.PendingCreateProfile
 				}
 				if targetProfile != "" && targetProfile != unknownProfileName {
+					if state.PendingCreateProfile != "" && targetProfile == state.PendingCreateProfile {
+						resolvedPendingProfile = true
+					}
 					_ = saveProfile(paths, targetProfile, synced, true)
 				}
 			}
 		}
 
-		if hadSuccess && state.PendingCreateProfile != "" {
+		shouldClearPending := state.PendingCreateProfile != "" && (resolvedPendingProfile || (opts.Profile != "" && opts.Profile == state.PendingCreateProfile))
+		if hadSuccess && shouldClearPending {
 			pendingProfile := state.PendingCreateProfile
 			state.PendingCreateProfile = ""
 			state.PendingCreateSince = ""
@@ -257,7 +262,7 @@ func usageProfileLabel(name string) string {
 	return name
 }
 
-func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string) (Credential, string, error) {
+func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string, pendingCreateProfile string) (Credential, string, error) {
 	if name == "__active__" {
 		cred, ok, err := adapter.ReadActiveCredential(paths)
 		if err != nil {
@@ -266,7 +271,7 @@ func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, prefe
 		if !ok {
 			return Credential{}, unknownProfileName, fmt.Errorf("no active credential available")
 		}
-		if preferredActiveProfile != "" {
+		if preferredActiveProfile != "" && shouldUsePreferredActiveProfile(paths, cred, preferredActiveProfile, pendingCreateProfile) {
 			return cred, preferredActiveProfile, nil
 		}
 		if matched := guessActiveProfileName(paths, cred); matched != "" {
@@ -279,6 +284,23 @@ func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, prefe
 		return Credential{}, name, err
 	}
 	return cred, name, nil
+}
+
+func shouldUsePreferredActiveProfile(paths ToolPaths, active Credential, preferredProfile string, pendingCreateProfile string) bool {
+	if preferredProfile == "" || preferredProfile == unknownProfileName {
+		return false
+	}
+
+	preferredCred, err := loadProfile(paths, preferredProfile)
+	if err == nil {
+		return credentialsLikelyMatch(active, preferredCred)
+	}
+
+	if os.IsNotExist(err) {
+		return pendingCreateProfile != "" && preferredProfile == pendingCreateProfile
+	}
+
+	return false
 }
 
 func guessActiveProfileName(paths ToolPaths, active Credential) string {

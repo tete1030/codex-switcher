@@ -18,6 +18,7 @@ func NewRootCommand() *cobra.Command {
 		Use:          "codex-switcher",
 		Short:        "Switch OpenAI Codex OAuth profiles across tools",
 		SilenceUsage: true,
+		Version:      app.Version,
 	}
 
 	root.AddCommand(newInspectCommand(svc))
@@ -26,8 +27,64 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newSwitchCommand(svc))
 	root.AddCommand(newUsageCommand(svc))
 	root.AddCommand(newProfilesCommand(svc))
+	root.AddCommand(newUpdateCommand(svc))
 
 	return root
+}
+
+func newUpdateCommand(svc *app.Service) *cobra.Command {
+	var checkOnly bool
+	var force bool
+	var repo string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update codex-switcher from latest GitHub release",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := svc.SelfUpdate(app.SelfUpdateOptions{
+				CheckOnly: checkOnly,
+				Force:     force,
+				Repo:      strings.TrimSpace(repo),
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return printJSON(result)
+			}
+
+			switch result.Status {
+			case "up_to_date":
+				fmt.Printf("up to date: %s (current=%s latest=%s)\n", result.Repo, result.CurrentVersion, result.LatestVersion)
+			case "update_available":
+				fmt.Printf("update available: %s -> %s\n", result.CurrentVersion, result.LatestVersion)
+				fmt.Printf("asset: %s\n", result.AssetName)
+				if result.ReleaseURL != "" {
+					fmt.Printf("release: %s\n", result.ReleaseURL)
+				}
+			case "downloaded":
+				fmt.Printf("downloaded update %s to %s\n", result.LatestVersion, result.Path)
+				if result.Message != "" {
+					fmt.Println(result.Message)
+				}
+			case "updated":
+				fmt.Printf("updated to %s\n", result.LatestVersion)
+				if result.Path != "" {
+					fmt.Printf("binary: %s\n", result.Path)
+				}
+			default:
+				fmt.Printf("status=%s current=%s latest=%s\n", result.Status, result.CurrentVersion, result.LatestVersion)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, do not download")
+	cmd.Flags().BoolVar(&force, "force", false, "Download/apply update even if version appears current")
+	cmd.Flags().StringVar(&repo, "repo", "", "Override release repo (owner/repo)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
+	return cmd
 }
 
 func newStatusCommand(svc *app.Service) *cobra.Command {

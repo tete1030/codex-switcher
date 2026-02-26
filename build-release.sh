@@ -21,7 +21,13 @@ USE_DOCKER="${USE_DOCKER:-1}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 CLEAN="${CLEAN:-0}"
 
-GO_BUILD_FLAGS="-trimpath -ldflags=-s -ldflags=-w"
+VERSION_VALUE="dev"
+if [[ -f "${ROOT_DIR}/VERSION" ]]; then
+  VERSION_VALUE="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
+fi
+
+GO_LDFLAGS="-s -w -X codex-switcher/internal/app.Version=${VERSION_VALUE}"
+GO_BUILD_FLAGS="-trimpath"
 if [[ "${FORCE_REBUILD}" == "1" ]]; then
   GO_BUILD_FLAGS="-a ${GO_BUILD_FLAGS}"
 fi
@@ -39,10 +45,10 @@ build_native() {
   echo "Building with local Go toolchain..."
   (
     cd "${ROOT_DIR}"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-linux-x86_64" ./cmd/codex-switcher
-    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-windows-x86_64.exe" ./cmd/codex-switcher
-    CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-macos-x86_64" ./cmd/codex-switcher
-    CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-macos-arm64" ./cmd/codex-switcher
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-linux-x86_64" ./cmd/codex-switcher
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-windows-x86_64.exe" ./cmd/codex-switcher
+    CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-macos-x86_64" ./cmd/codex-switcher
+    CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-macos-arm64" ./cmd/codex-switcher
   )
 }
 
@@ -56,11 +62,12 @@ build_docker() {
       -v "${ROOT_DIR}":/src \
       -w /src \
       "${GO_DOCKER_IMAGE}" \
-      bash -s -- "${OUT_DIR}" "${GO_BUILD_FLAGS}" <<'EOF'
+      bash -s -- "${OUT_DIR}" "${GO_BUILD_FLAGS}" "${GO_LDFLAGS}" <<'EOF'
 set -euo pipefail
 
 OUT_DIR="$1"
 GO_BUILD_FLAGS="$2"
+GO_LDFLAGS="$3"
 export PATH="/usr/local/go/bin:$PATH"
 export HOME=/tmp
 export GOCACHE=/tmp/go-build
@@ -69,10 +76,10 @@ export GOMODCACHE=/tmp/go/pkg/mod
 
 mkdir -p "${OUT_DIR}"
 
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-linux-x86_64" ./cmd/codex-switcher
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-windows-x86_64.exe" ./cmd/codex-switcher
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-macos-x86_64" ./cmd/codex-switcher
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ${GO_BUILD_FLAGS} -o "${OUT_DIR}/codex-switcher-macos-arm64" ./cmd/codex-switcher
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-linux-x86_64" ./cmd/codex-switcher
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-windows-x86_64.exe" ./cmd/codex-switcher
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-macos-x86_64" ./cmd/codex-switcher
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ${GO_BUILD_FLAGS} -ldflags "${GO_LDFLAGS}" -o "${OUT_DIR}/codex-switcher-macos-arm64" ./cmd/codex-switcher
 EOF
   )
 }

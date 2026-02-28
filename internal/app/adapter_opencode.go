@@ -60,7 +60,7 @@ func (a *openCodeAdapter) ReadActiveCredential(paths ToolPaths) (Credential, boo
 		Expires:   expires,
 		AccountID: accountID,
 	}
-	return cred, true, nil
+	return normalizeCredentialIdentity(cred), true, nil
 }
 
 func (a *openCodeAdapter) WriteActiveCredential(paths ToolPaths, cred Credential) error {

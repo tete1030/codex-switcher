@@ -105,14 +105,7 @@ func (a *codexAdapter) ReadActiveCredential(paths ToolPaths) (Credential, bool, 
 		AccountID: accountID,
 		IDToken:   idToken,
 	}
-	if idToken != "" {
-		claims := parseJWTClaims(idToken)
-		cred.Email = extractEmail(claims)
-		if cred.AccountID == "" {
-			cred.AccountID = extractAccountID(claims)
-		}
-	}
-	return cred, true, nil
+	return normalizeCredentialIdentity(cred), true, nil
 }
 
 func (a *codexAdapter) WriteActiveCredential(paths ToolPaths, cred Credential) error {

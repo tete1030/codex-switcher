@@ -87,3 +87,27 @@ func extractEmail(claims map[string]any) string {
 	}
 	return ""
 }
+
+func normalizeCredentialIdentity(cred Credential) Credential {
+	if claims := parseJWTClaims(cred.Access); claims != nil {
+		if accountID := extractAccountID(claims); accountID != "" {
+			cred.AccountID = accountID
+		}
+		if email := extractEmail(claims); email != "" {
+			cred.Email = email
+		}
+	}
+	if claims := parseJWTClaims(cred.IDToken); claims != nil {
+		if cred.AccountID == "" {
+			if accountID := extractAccountID(claims); accountID != "" {
+				cred.AccountID = accountID
+			}
+		}
+		if cred.Email == "" {
+			if email := extractEmail(claims); email != "" {
+				cred.Email = email
+			}
+		}
+	}
+	return cred
+}

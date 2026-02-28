@@ -69,3 +69,64 @@ func TestOpenClawClearActivePreservesProfilesAndUsesSentinelOrder(t *testing.T) 
 		t.Fatalf("expected no active credential after clear, got %+v", cred)
 	}
 }
+
+func TestOpenClawReadActiveCredentialFindsNewLoginProfileAfterPendingCreate(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	store := map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			"openai-codex:rotater:buy1": map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "old-access",
+				"refresh":   "old-refresh",
+				"accountId": "acct-old",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{"openai-codex:rotater:buy1"},
+		},
+	}
+	if err := writeJSONAtomic(paths.ActivePath, store); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+
+	adapter := &openClawAdapter{}
+	if err := adapter.ClearActiveCredential(paths); err != nil {
+		t.Fatalf("clear active: %v", err)
+	}
+
+	updated, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	updated.Profiles["openai-codex:oauthed:new"] = openClawCredential{
+		Type:      "oauth",
+		Provider:  "openai-codex",
+		Access:    "new-access",
+		Refresh:   "new-refresh",
+		AccountID: "acct-new",
+	}
+	if err := writeOpenClawStore(paths.ActivePath, updated); err != nil {
+		t.Fatalf("write updated store: %v", err)
+	}
+
+	cred, ok, err := adapter.ReadActiveCredential(paths)
+	if err != nil {
+		t.Fatalf("read active credential: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected active credential")
+	}
+	if cred.AccountID != "acct-new" {
+		t.Fatalf("expected account acct-new, got %q", cred.AccountID)
+	}
+}

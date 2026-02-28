@@ -12,6 +12,7 @@ import (
 type openClawAdapter struct{}
 
 const openClawPendingLoginSentinelID = "openai-codex:rotater:__pending_login__"
+const openClawPendingKnownIDsKey = "codex_switcher_pending_known_profile_ids"
 
 func (a *openClawAdapter) Tool() ToolName { return ToolOpenClaw }
 
@@ -61,8 +62,13 @@ func (a *openClawAdapter) ReadActiveCredential(paths ToolPaths) (Credential, boo
 	}
 
 	order := activeOpenClawOrder(store)
+	hasPendingSentinel := false
 	now := time.Now().UnixMilli()
 	for _, id := range order {
+		if id == openClawPendingLoginSentinelID {
+			hasPendingSentinel = true
+			continue
+		}
 		entry, ok := store.Profiles[id]
 		if !ok {
 			continue
@@ -74,14 +80,14 @@ func (a *openClawAdapter) ReadActiveCredential(paths ToolPaths) (Credential, boo
 			if entry.Access == "" || entry.Refresh == "" {
 				continue
 			}
-			return Credential{
+			return normalizeCredentialIdentity(Credential{
 				Provider:  "openai-codex",
 				Access:    entry.Access,
 				Refresh:   entry.Refresh,
 				Expires:   entry.Expires,
 				AccountID: entry.AccountID,
 				Email:     entry.Email,
-			}, true, nil
+			}), true, nil
 		}
 		if entry.Type == "token" {
 			if entry.Token == "" {
@@ -90,12 +96,61 @@ func (a *openClawAdapter) ReadActiveCredential(paths ToolPaths) (Credential, boo
 			if entry.Expires > 0 && now >= entry.Expires {
 				continue
 			}
-			return Credential{
+			return normalizeCredentialIdentity(Credential{
 				Provider: "openai-codex",
 				Access:   entry.Token,
 				Expires:  entry.Expires,
 				Email:    entry.Email,
-			}, true, nil
+			}), true, nil
+		}
+	}
+
+	if hasPendingSentinel {
+		known := pendingKnownOpenClawProfileIDs(store)
+		ids := make([]string, 0, len(store.Profiles))
+		for id := range store.Profiles {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+
+		for _, id := range ids {
+			if id == openClawPendingLoginSentinelID {
+				continue
+			}
+			if _, seen := known[id]; seen {
+				continue
+			}
+			entry := store.Profiles[id]
+			if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
+				continue
+			}
+			if entry.Type == "oauth" {
+				if entry.Access == "" || entry.Refresh == "" {
+					continue
+				}
+				return normalizeCredentialIdentity(Credential{
+					Provider:  "openai-codex",
+					Access:    entry.Access,
+					Refresh:   entry.Refresh,
+					Expires:   entry.Expires,
+					AccountID: entry.AccountID,
+					Email:     entry.Email,
+				}), true, nil
+			}
+			if entry.Type == "token" {
+				if entry.Token == "" {
+					continue
+				}
+				if entry.Expires > 0 && now >= entry.Expires {
+					continue
+				}
+				return normalizeCredentialIdentity(Credential{
+					Provider: "openai-codex",
+					Access:   entry.Token,
+					Expires:  entry.Expires,
+					Email:    entry.Email,
+				}), true, nil
+			}
 		}
 	}
 
@@ -124,8 +179,20 @@ func (a *openClawAdapter) ClearActiveCredential(paths ToolPaths) error {
 	if store.Order == nil {
 		store.Order = map[string][]string{}
 	}
+	if store.Raw == nil {
+		store.Raw = map[string]any{}
+	}
 
 	store.Order["openai-codex"] = []string{openClawPendingLoginSentinelID}
+	known := make([]string, 0)
+	for id, entry := range store.Profiles {
+		if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
+			continue
+		}
+		known = append(known, id)
+	}
+	sort.Strings(known)
+	store.Raw[openClawPendingKnownIDsKey] = known
 
 	if store.Version == 0 {
 		store.Version = 1
@@ -143,6 +210,9 @@ func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, 
 	}
 	if store.Order == nil {
 		store.Order = map[string][]string{}
+	}
+	if store.Raw == nil {
+		store.Raw = map[string]any{}
 	}
 
 	profileID := "openai-codex:rotater:" + profileName
@@ -169,6 +239,7 @@ func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, 
 		merged = append(merged, id)
 	}
 	store.Order["openai-codex"] = dedupeStrings(merged)
+	delete(store.Raw, openClawPendingKnownIDsKey)
 
 	if store.Version == 0 {
 		store.Version = 1
@@ -294,6 +365,28 @@ func dedupeStrings(values []string) []string {
 		}
 		seen[v] = struct{}{}
 		out = append(out, v)
+	}
+	return out
+}
+
+func pendingKnownOpenClawProfileIDs(store openClawStore) map[string]struct{} {
+	out := map[string]struct{}{}
+	if store.Raw == nil {
+		return out
+	}
+	rawIDs, ok := store.Raw[openClawPendingKnownIDsKey]
+	if !ok {
+		return out
+	}
+	list, ok := rawIDs.([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range list {
+		s, ok := item.(string)
+		if ok && strings.TrimSpace(s) != "" {
+			out[s] = struct{}{}
+		}
 	}
 	return out
 }

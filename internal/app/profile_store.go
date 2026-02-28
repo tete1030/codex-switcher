@@ -56,7 +56,7 @@ func loadProfile(paths ToolPaths, name string) (Credential, error) {
 	if p.Access == "" || p.Refresh == "" {
 		return Credential{}, fmt.Errorf("profile %q is missing access/refresh token", name)
 	}
-	return Credential{
+	cred := Credential{
 		Provider:  p.Provider,
 		Access:    p.Access,
 		Refresh:   p.Refresh,
@@ -65,7 +65,8 @@ func loadProfile(paths ToolPaths, name string) (Credential, error) {
 		IDToken:   p.IDToken,
 		Email:     p.Email,
 		UpdatedAt: p.UpdatedAt,
-	}, nil
+	}
+	return normalizeCredentialIdentity(cred), nil
 }
 
 func saveProfile(paths ToolPaths, name string, cred Credential, force bool) error {

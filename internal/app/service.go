@@ -235,16 +235,22 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 		for _, t := range targets {
 			status := "switched"
 			pending := false
+			changed := true
+			snapshotProfile := chooseSnapshotProfile(t.state, profile)
 			if t.action == "prepare" {
 				status = "prepared"
 				pending = true
+			} else if t.action == "switch" && !t.materialize && t.state.ActiveProfile == profile {
+				status = "already_active"
+				changed = false
+				snapshotProfile = ""
 			}
 			results = append(results, SwitchResult{
 				Tool:            t.tool,
 				FromProfile:     t.state.ActiveProfile,
 				ToProfile:       profile,
-				SnapshotProfile: chooseSnapshotProfile(t.state, profile),
-				Changed:         true,
+				SnapshotProfile: snapshotProfile,
+				Changed:         changed,
 				Status:          status,
 				PendingCreate:   pending,
 			})
@@ -300,6 +306,60 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 			activeRaw: activeRaw, activeSeen: activeSeen,
 			stateRaw: stateRaw, stateSeen: stateSeen,
 		})
+
+		sameActiveTarget := t.action == "switch" && !t.materialize && oldState.ActiveProfile == profile
+		if sameActiveTarget {
+			status := "already_active"
+			changed := false
+
+			if hadCred && oldCred.Refresh != "" && oldCred.Access != "" {
+				if err := saveProfile(t.paths, profile, oldCred, true); err != nil {
+					s.rollback(rollback)
+					return nil, WrapExit(ExitIOFailure, err)
+				}
+			} else {
+				status = "switched"
+				changed = true
+				if t.tool == ToolOpenClaw {
+					oa, ok := t.adapter.(*openClawAdapter)
+					if !ok {
+						s.rollback(rollback)
+						return nil, WrapExit(ExitIOFailure, errors.New("openclaw adapter mismatch"))
+					}
+					if err := oa.WriteWithProfile(t.paths, profile, t.cred); err != nil {
+						s.rollback(rollback)
+						return nil, WrapExit(ExitIOFailure, err)
+					}
+				} else {
+					if err := t.adapter.WriteActiveCredential(t.paths, t.cred); err != nil {
+						s.rollback(rollback)
+						return nil, WrapExit(ExitIOFailure, err)
+					}
+				}
+			}
+
+			newState := oldState
+			newState.Version = 1
+			newState.ActiveProfile = profile
+			newState.PendingCreateProfile = ""
+			newState.PendingCreateSince = ""
+			newState.LastSwitchAt = time.Now().UTC().Format(time.RFC3339)
+			if err := saveState(t.paths, newState); err != nil {
+				s.rollback(rollback)
+				return nil, WrapExit(ExitIOFailure, err)
+			}
+
+			results = append(results, SwitchResult{
+				Tool:            t.tool,
+				FromProfile:     oldState.ActiveProfile,
+				ToProfile:       profile,
+				SnapshotProfile: "",
+				Changed:         changed,
+				Status:          status,
+				PendingCreate:   false,
+			})
+			continue
+		}
 
 		snapshotProfile := chooseSnapshotProfile(oldState, profile)
 		if hadCred && oldCred.Refresh != "" && oldCred.Access != "" {

@@ -258,6 +258,8 @@ func newSwitchCommand(svc *app.Service) *cobra.Command {
 					fmt.Printf("%s: %s (%s)\n", item.Tool, item.Status, item.Warning)
 				case "prepared":
 					fmt.Printf("%s: %s -> %s (%s, pending-create=true, snapshot=%s)\n", item.Tool, zeroDefault(item.FromProfile, "-"), item.ToProfile, mode, zeroDefault(item.SnapshotProfile, "-"))
+				case "already_active":
+					fmt.Printf("%s: %s -> %s (%s)\n", item.Tool, zeroDefault(item.FromProfile, "-"), item.ToProfile, mode)
 				default:
 					fmt.Printf("%s: %s -> %s (%s, snapshot=%s)\n", item.Tool, zeroDefault(item.FromProfile, "-"), item.ToProfile, mode, zeroDefault(item.SnapshotProfile, "-"))
 				}

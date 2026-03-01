@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"codex-switcher/internal/app"
@@ -306,36 +307,63 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 			if jsonOut {
 				return printJSON(results)
 			}
+
+			summary := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(summary, "profile\tplan\taccount\tcredits")
 			for _, item := range results {
 				label := fmt.Sprintf("%s/%s", item.Tool, item.Profile)
+				plan := "N/A"
+				if item.Status == "ok" {
+					plan = zeroDefault(item.Plan, "unknown")
+				}
+				account := formatAccountForDisplay(item.AccountID)
+				credits := "-"
+				if item.Status == "ok" {
+					credits = formatCreditsForDisplay(item.CreditsBalance)
+				}
+				_, _ = fmt.Fprintf(summary, "%s\t%s\t%s\t%s\n", label, plan, account, credits)
+			}
+			_ = summary.Flush()
+
+			fmt.Println()
+
+			windows := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(windows, "profile\twindow\tused\treset(local)\tremaining")
+			for i, item := range results {
+				if i > 0 {
+					_, _ = fmt.Fprintln(windows, "----------\t------\t------\t---------------------\t----------------")
+				}
+
+				label := fmt.Sprintf("%s/%s", item.Tool, item.Profile)
 				if item.Status != "ok" {
-					fmt.Printf("%s: N/A", label)
-					if item.AccountID != "" {
-						fmt.Printf(" account_id=%s", item.AccountID)
+					errText := strings.ReplaceAll(strings.TrimSpace(item.Error), "\n", " ")
+					if errText == "" {
+						errText = "unknown error"
 					}
-					fmt.Printf(" (%s)\n", item.Error)
+					_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t%s\n", label, errText)
 					continue
 				}
-				fmt.Printf("%s: plan=%s", label, zeroDefault(item.Plan, "unknown"))
-				if item.AccountID != "" {
-					fmt.Printf(" account_id=%s", item.AccountID)
+
+				if len(item.Windows) == 0 {
+					_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t-\n", label)
+					continue
 				}
-				if item.CreditsBalance != nil {
-					fmt.Printf(" credits=$%.2f", *item.CreditsBalance)
-				}
-				if item.Refreshed {
-					fmt.Printf(" refreshed=true")
-				}
-				fmt.Println()
-				for _, w := range item.Windows {
-					fmt.Printf("  - %s: %.1f%%", w.Label, w.UsedPercent)
-					if w.ResetAt > 0 {
-						fmt.Printf(" reset=%s", formatResetForDisplay(w.ResetAtISO, w.ResetAt))
-						fmt.Printf(" remaining=%.2fd", w.RemainingDays)
+
+				for wi, w := range item.Windows {
+					profileCell := ""
+					if wi == 0 {
+						profileCell = label
 					}
-					fmt.Println()
+					reset := "-"
+					remaining := "-"
+					if w.ResetAt > 0 {
+						reset = formatResetForDisplay(w.ResetAt)
+						remaining = formatRemainingForDisplay(w.ResetAt)
+					}
+					_, _ = fmt.Fprintf(windows, "%s\t%s\t%.1f%%\t%s\t%s\n", profileCell, w.Label, w.UsedPercent, reset, remaining)
 				}
 			}
+			_ = windows.Flush()
 			return nil
 		},
 	}
@@ -438,12 +466,55 @@ func toStrings(tools []app.ToolName) []string {
 	return out
 }
 
-func formatResetForDisplay(resetISO string, resetMillis int64) string {
-	if strings.TrimSpace(resetISO) != "" {
-		return resetISO
-	}
+func formatResetForDisplay(resetMillis int64) string {
 	if resetMillis <= 0 {
 		return "-"
 	}
-	return time.UnixMilli(resetMillis).UTC().Format(time.RFC3339)
+	return time.UnixMilli(resetMillis).Local().Format("2006-01-02 15:04 MST")
+}
+
+func formatRemainingForDisplay(resetMillis int64) string {
+	if resetMillis <= 0 {
+		return "-"
+	}
+	remaining := time.Until(time.UnixMilli(resetMillis))
+	if remaining <= 0 {
+		return "0m"
+	}
+
+	totalMinutes := int(remaining.Minutes())
+	days := totalMinutes / (24 * 60)
+	totalMinutes -= days * 24 * 60
+	hours := totalMinutes / 60
+	minutes := totalMinutes % 60
+
+	parts := make([]string, 0, 3)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatAccountForDisplay(accountID string) string {
+	trimmed := strings.TrimSpace(accountID)
+	if trimmed == "" {
+		return "-"
+	}
+	if len(trimmed) <= 12 {
+		return trimmed
+	}
+	return trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
+}
+
+func formatCreditsForDisplay(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("$%.2f", *value)
 }

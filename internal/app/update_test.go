@@ -1,10 +1,14 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -112,5 +116,65 @@ func TestSelfUpdateCheckOnlyUpToDate(t *testing.T) {
 	}
 	if result.Status != "up_to_date" {
 		t.Fatalf("expected up_to_date, got %q", result.Status)
+	}
+}
+
+func TestRenameWithRetryReplacesExistingFile(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.bin")
+	dst := filepath.Join(tmp, "dst.bin")
+
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	if err := renameWithRetry(src, dst, true); err != nil {
+		t.Fatalf("renameWithRetry failed: %v", err)
+	}
+
+	bytes, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(bytes) != "new" {
+		t.Fatalf("expected dst content from src, got %q", string(bytes))
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("expected src removed after rename, got err=%v", err)
+	}
+}
+
+func TestIsRetryableRenameError(t *testing.T) {
+	if !isRetryableRenameError(os.ErrPermission) {
+		t.Fatalf("expected os.ErrPermission to be retryable")
+	}
+
+	wrapped := fmt.Errorf("wrapper: %w", os.ErrPermission)
+	if !isRetryableRenameError(wrapped) {
+		t.Fatalf("expected wrapped os.ErrPermission to be retryable")
+	}
+
+	if runtime.GOOS == "windows" {
+		if !isRetryableRenameError(syscall.Errno(32)) {
+			t.Fatalf("expected windows sharing violation to be retryable")
+		}
+		if isRetryableRenameError(syscall.Errno(2)) {
+			t.Fatalf("did not expect file-not-found to be retryable")
+		}
+	} else {
+		if !isRetryableRenameError(syscall.Errno(16)) {
+			t.Fatalf("expected unix EBUSY to be retryable")
+		}
+		if isRetryableRenameError(syscall.Errno(2)) {
+			t.Fatalf("did not expect ENOENT to be retryable")
+		}
+	}
+
+	nonRetry := errors.New("invalid argument")
+	if isRetryableRenameError(nonRetry) {
+		t.Fatalf("expected non-retryable for plain error")
 	}
 }

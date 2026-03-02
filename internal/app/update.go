@@ -11,7 +11,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+)
+
+const (
+	renameRetries     = 20
+	renameRetryDelay  = 150 * time.Millisecond
+	renameRetryFactor = 2
 )
 
 type SelfUpdateOptions struct {
@@ -135,7 +142,7 @@ func (s *Service) SelfUpdate(opts SelfUpdateOptions) (SelfUpdateResult, error) {
 		return SelfUpdateResult{}, WrapExit(ExitIOFailure, err)
 	}
 
-	if err := os.Rename(tmpPath, execPath); err != nil {
+	if err := renameWithRetry(tmpPath, execPath, true); err != nil {
 		_ = os.Remove(tmpPath)
 		return SelfUpdateResult{}, WrapExit(ExitIOFailure, err)
 	}
@@ -240,7 +247,7 @@ func downloadFile(url string, path string, mode os.FileMode) error {
 		return err
 	}
 
-	tmpPath := path + ".part"
+	tmpPath := fmt.Sprintf("%s.part.%d", path, time.Now().UnixNano())
 	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
@@ -265,11 +272,84 @@ func downloadFile(url string, path string, mode os.FileMode) error {
 		return err
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := renameWithRetry(tmpPath, path, true); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
 	return nil
+}
+
+func renameWithRetry(src string, dst string, replaceExisting bool) error {
+	delay := renameRetryDelay
+	var lastErr error
+
+	for attempt := 0; attempt < renameRetries; attempt++ {
+		if replaceExisting {
+			if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+				if isRetryableRenameError(err) {
+					lastErr = err
+					time.Sleep(delay)
+					delay = nextRetryDelay(delay)
+					continue
+				}
+				return err
+			}
+		}
+
+		err := os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		if !isRetryableRenameError(err) {
+			return err
+		}
+		lastErr = err
+		time.Sleep(delay)
+		delay = nextRetryDelay(delay)
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("rename failed without explicit error")
+	}
+	return fmt.Errorf("failed to rename %s -> %s after retries (file may be temporarily locked): %w", src, dst, lastErr)
+}
+
+func nextRetryDelay(current time.Duration) time.Duration {
+	next := current * renameRetryFactor
+	if next > 2*time.Second {
+		return 2 * time.Second
+	}
+	return next
+}
+
+func isRetryableRenameError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		switch uint32(errno) {
+		case 5, 32, 33, 1224:
+			return true
+		default:
+			return false
+		}
+	}
+
+	switch uint32(errno) {
+	case 1, 13, 16, 26:
+		return true
+	default:
+		return false
+	}
 }
 
 func compareVersions(current string, latest string) int {

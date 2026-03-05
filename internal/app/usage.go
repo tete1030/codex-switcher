@@ -103,7 +103,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 				preferredActiveProfile = firstNonEmpty(state.ActiveProfile, state.PendingCreateProfile)
 			}
 
-			cred, sourceLabel, resolveErr := resolveUsageCredential(paths, adapter, name, preferredActiveProfile, state.PendingCreateProfile)
+			cred, sourceLabel, resolveErr := resolveUsageCredential(tool, paths, adapter, name, preferredActiveProfile, state.PendingCreateProfile)
 			if resolveErr != nil {
 				results = append(results, UsageResult{
 					Tool:     tool,
@@ -262,7 +262,7 @@ func usageProfileLabel(name string) string {
 	return name
 }
 
-func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string, pendingCreateProfile string) (Credential, string, error) {
+func resolveUsageCredential(tool ToolName, paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string, pendingCreateProfile string) (Credential, string, error) {
 	if name == "__active__" {
 		cred, ok, err := adapter.ReadActiveCredential(paths)
 		if err != nil {
@@ -276,6 +276,11 @@ func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, prefe
 		}
 		if matched := guessActiveProfileName(paths, cred); matched != "" {
 			return cred, matched, nil
+		}
+		if tool == ToolOpenClaw && preferredActiveProfile != "" && preferredActiveProfile != unknownProfileName {
+			if _, err := loadProfile(paths, preferredActiveProfile); err == nil {
+				return cred, preferredActiveProfile, nil
+			}
 		}
 		return cred, unknownProfileName, nil
 	}

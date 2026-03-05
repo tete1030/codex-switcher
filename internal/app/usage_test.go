@@ -267,3 +267,74 @@ func TestUsageDefaultDoesNotTrustStaleActiveProfileLabel(t *testing.T) {
 		t.Fatalf("did not expect codex/my result when active tokens match buy1")
 	}
 }
+
+func TestUsageDefaultOpenClawFallsBackToStateActiveProfile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmp, "home"))
+	t.Setenv("OPENCLAW_AGENT_DIR", filepath.Join(tmp, "agent"))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte(`{"plan_type":"plus","credits":{"balance":0},"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":1,"reset_at":1773000000},"secondary_window":{"limit_window_seconds":86400,"used_percent":2,"reset_at":1773086400}}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CODEX_SWITCHER_USAGE_URL", server.URL+"/backend-api/wham/usage")
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := writeJSONAtomic(paths.ActivePath, map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			openClawManagedProfileID: map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "managed-access",
+				"refresh":   "managed-refresh",
+				"accountId": "acct-managed",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{openClawManagedProfileID},
+		},
+	}); err != nil {
+		t.Fatalf("write openclaw active store: %v", err)
+	}
+
+	if err := saveProfile(paths, "my", Credential{Provider: "openai-codex", Access: "my-access", Refresh: "my-refresh", AccountID: "acct-my"}, true); err != nil {
+		t.Fatalf("save my profile: %v", err)
+	}
+	if err := saveProfile(paths, "buy1", Credential{Provider: "openai-codex", Access: "buy1-access", Refresh: "buy1-refresh", AccountID: "acct-buy1"}, true); err != nil {
+		t.Fatalf("save buy1 profile: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "my", PreviousProfile: "buy1"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	results, err := svc.Usage(UsageOptions{})
+	if err != nil {
+		t.Fatalf("usage failed: %v", err)
+	}
+
+	foundOpenClaw := false
+	for _, result := range results {
+		if result.Tool != ToolOpenClaw {
+			continue
+		}
+		if result.Status == "ok" {
+			foundOpenClaw = true
+			if result.Profile != "my" {
+				t.Fatalf("expected openclaw profile label my, got %q (result=%+v)", result.Profile, result)
+			}
+		}
+	}
+	if !foundOpenClaw {
+		t.Fatalf("expected openclaw usage result, got %+v", results)
+	}
+}

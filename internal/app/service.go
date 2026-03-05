@@ -159,6 +159,23 @@ type SwitchResult struct {
 	PendingCreate   bool     `json:"pendingCreate,omitempty"`
 }
 
+type RenameProfileResult struct {
+	Tool        ToolName `json:"tool"`
+	FromProfile string   `json:"fromProfile"`
+	ToProfile   string   `json:"toProfile"`
+	Changed     bool     `json:"changed"`
+}
+
+type MigrateOpenClawResult struct {
+	Tool                     ToolName `json:"tool"`
+	Status                   string   `json:"status"`
+	Changed                  bool     `json:"changed"`
+	ManagedProfileSet        bool     `json:"managedProfileSet,omitempty"`
+	RemovedLegacyRotater     int      `json:"removedLegacyRotaterProfiles,omitempty"`
+	RemovedPendingSentinel   bool     `json:"removedPendingSentinel,omitempty"`
+	RemovedPendingKnownState bool     `json:"removedPendingKnownMarker,omitempty"`
+}
+
 func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) ([]SwitchResult, error) {
 	if err := validateProfileName(profile); err != nil {
 		return nil, WrapExit(ExitUserError, err)
@@ -475,6 +492,150 @@ func (s *Service) ListProfiles(tool ToolName) ([]string, error) {
 	return listProfiles(paths)
 }
 
+func (s *Service) MigrateOpenClaw() (MigrateOpenClawResult, error) {
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		return MigrateOpenClawResult{}, WrapExit(ExitIOFailure, err)
+	}
+
+	lock, err := acquireLock(paths.LockPath)
+	if err != nil {
+		return MigrateOpenClawResult{}, WrapExit(ExitIOFailure, err)
+	}
+	defer func() {
+		_ = lock.Release()
+	}()
+
+	stats, err := migrateOpenClawStore(paths)
+	if err != nil {
+		return MigrateOpenClawResult{}, WrapExit(ExitIOFailure, err)
+	}
+
+	result := MigrateOpenClawResult{
+		Tool:                     ToolOpenClaw,
+		Changed:                  stats.Changed,
+		ManagedProfileSet:        stats.ManagedProfileSet,
+		RemovedLegacyRotater:     stats.RemovedLegacyRotater,
+		RemovedPendingSentinel:   stats.RemovedPendingSentinel,
+		RemovedPendingKnownState: stats.RemovedPendingKnownMarker,
+	}
+	switch {
+	case !stats.HasStore:
+		result.Status = "no_store"
+	case stats.Changed:
+		result.Status = "migrated"
+	default:
+		result.Status = "no_changes"
+	}
+
+	return result, nil
+}
+
+func (s *Service) RenameProfile(from string, to string, tools []ToolName) ([]RenameProfileResult, error) {
+	if err := validateProfileName(from); err != nil {
+		return nil, WrapExit(ExitUserError, err)
+	}
+	if err := validateProfileName(to); err != nil {
+		return nil, WrapExit(ExitUserError, err)
+	}
+	if from == to {
+		return nil, WrapExit(ExitUserError, fmt.Errorf("source and target profile names are the same: %q", from))
+	}
+
+	type renameTarget struct {
+		tool  ToolName
+		paths ToolPaths
+	}
+
+	targets := make([]renameTarget, 0, len(tools))
+	for _, tool := range tools {
+		paths, err := resolveToolPaths(tool)
+		if err != nil {
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+		targets = append(targets, renameTarget{tool: tool, paths: paths})
+	}
+
+	locks := make([]*FileLock, 0, len(targets))
+	for _, t := range targets {
+		lock, err := acquireLock(t.paths.LockPath)
+		if err != nil {
+			for _, held := range locks {
+				_ = held.Release()
+			}
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+		locks = append(locks, lock)
+	}
+	defer func() {
+		for _, lock := range locks {
+			_ = lock.Release()
+		}
+	}()
+
+	for _, t := range targets {
+		fromPath := profilePath(t.paths, from)
+		toPath := profilePath(t.paths, to)
+
+		if _, err := os.Stat(fromPath); err != nil {
+			if os.IsNotExist(err) {
+				return nil, WrapExit(ExitUserError, fmt.Errorf("%s: profile %q does not exist", t.tool, from))
+			}
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+
+		if _, err := os.Stat(toPath); err == nil {
+			return nil, WrapExit(ExitUserError, fmt.Errorf("%s: profile %q already exists", t.tool, to))
+		} else if !os.IsNotExist(err) {
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+
+	}
+
+	results := make([]RenameProfileResult, 0, len(targets))
+	for _, t := range targets {
+		if err := os.Rename(profilePath(t.paths, from), profilePath(t.paths, to)); err != nil {
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+
+		state, err := loadState(t.paths)
+		if err != nil {
+			return nil, WrapExit(ExitIOFailure, err)
+		}
+		stateChanged := false
+		if state.ActiveProfile == from {
+			state.ActiveProfile = to
+			stateChanged = true
+		}
+		if state.PreviousProfile == from {
+			state.PreviousProfile = to
+			stateChanged = true
+		}
+		if state.PendingCreateProfile == from {
+			state.PendingCreateProfile = to
+			stateChanged = true
+		}
+		if stateChanged {
+			state.LastSwitchAt = time.Now().UTC().Format(time.RFC3339)
+			if err := saveState(t.paths, state); err != nil {
+				return nil, WrapExit(ExitIOFailure, err)
+			}
+		}
+
+		results = append(results, RenameProfileResult{
+			Tool:        t.tool,
+			FromProfile: from,
+			ToProfile:   to,
+			Changed:     true,
+		})
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Tool < results[j].Tool
+	})
+	return results, nil
+}
+
 func (s *Service) DeleteProfile(name string, tools []ToolName) error {
 	if err := validateProfileName(name); err != nil {
 		return WrapExit(ExitUserError, err)
@@ -493,13 +654,6 @@ func (s *Service) DeleteProfile(name string, tools []ToolName) error {
 		if err := deleteProfile(paths, name); err != nil {
 			_ = lock.Release()
 			return WrapExit(ExitIOFailure, err)
-		}
-
-		if tool == ToolOpenClaw {
-			if err := removeOpenClawRotaterProfile(paths, name); err != nil {
-				_ = lock.Release()
-				return WrapExit(ExitIOFailure, err)
-			}
 		}
 
 		state, err := loadState(paths)

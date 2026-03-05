@@ -123,14 +123,8 @@ func TestDeleteProfileRemovesOpenClawRotaterStoreEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read openclaw store: %v", err)
 	}
-	if _, ok := updatedStore.Profiles[targetID]; ok {
-		t.Fatalf("expected rotater profile removed from openclaw store")
-	}
-	order := updatedStore.Order["openai-codex"]
-	for _, id := range order {
-		if id == targetID {
-			t.Fatalf("expected rotater profile removed from openclaw order")
-		}
+	if _, ok := updatedStore.Profiles[targetID]; !ok {
+		t.Fatalf("expected openclaw auth store untouched during profile delete")
 	}
 
 	updatedState, err := loadState(paths)
@@ -257,8 +251,8 @@ func TestSwitchMaterializesPendingCreateProfileFromOpenClawActiveCredential(t *t
 	if err != nil {
 		t.Fatalf("read openclaw store: %v", err)
 	}
-	if _, ok := store.Profiles["openai-codex:rotater:buy1"]; !ok {
-		t.Fatalf("expected openclaw rotater profile for buy1 in active store")
+	if _, ok := store.Profiles[openClawManagedProfileID]; !ok {
+		t.Fatalf("expected openclaw managed profile in active store")
 	}
 
 	state, err := loadState(paths)
@@ -414,6 +408,340 @@ func TestSwitchSameActiveProfileRepairsMissingActiveWithoutSnapshot(t *testing.T
 	}
 	if activeTokens["access_token"] != "profile-access" || activeTokens["refresh_token"] != "profile-refresh" {
 		t.Fatalf("expected active auth repaired from profile, got %+v", activeTokens)
+	}
+}
+
+func TestRenameProfileRenamesNonActiveProfile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	paths, err := resolveToolPaths(ToolCodex)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := saveProfile(paths, "buy1", Credential{Provider: "openai-codex", Access: "a", Refresh: "r", AccountID: "acct-1"}, true); err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "my", PreviousProfile: "last", PendingCreateProfile: "pending", PendingCreateSince: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	results, err := svc.RenameProfile("buy1", "buy2", []ToolName{ToolCodex})
+	if err != nil {
+		t.Fatalf("rename profile failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d", len(results))
+	}
+	if results[0].FromProfile != "buy1" || results[0].ToProfile != "buy2" || !results[0].Changed {
+		t.Fatalf("unexpected rename result: %+v", results[0])
+	}
+
+	if _, err := os.Stat(profilePath(paths, "buy1")); !os.IsNotExist(err) {
+		t.Fatalf("expected old profile removed, got err=%v", err)
+	}
+	renamed, err := loadProfile(paths, "buy2")
+	if err != nil {
+		t.Fatalf("expected renamed profile to exist: %v", err)
+	}
+	if renamed.AccountID != "acct-1" {
+		t.Fatalf("expected account id preserved, got %q", renamed.AccountID)
+	}
+
+	state, err := loadState(paths)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.ActiveProfile != "my" || state.PreviousProfile != "last" || state.PendingCreateProfile != "pending" {
+		t.Fatalf("expected unrelated state unchanged, got %+v", state)
+	}
+}
+
+func TestRenameProfileUpdatesStateReferencesWhenActive(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	paths, err := resolveToolPaths(ToolCodex)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := saveProfile(paths, "my", Credential{Provider: "openai-codex", Access: "a", Refresh: "r"}, true); err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "my", PreviousProfile: "my", PendingCreateProfile: "my", PendingCreateSince: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	if _, err := svc.RenameProfile("my", "my2", []ToolName{ToolCodex}); err != nil {
+		t.Fatalf("rename profile failed: %v", err)
+	}
+
+	state, err := loadState(paths)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.ActiveProfile != "my2" || state.PreviousProfile != "my2" || state.PendingCreateProfile != "my2" {
+		t.Fatalf("expected state references updated, got %+v", state)
+	}
+	if state.PendingCreateSince != "2026-01-01T00:00:00Z" {
+		t.Fatalf("expected pending_create_since unchanged, got %q", state.PendingCreateSince)
+	}
+}
+
+func TestRenameProfileFailsWhenSourceMissingInStrictMode(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	svc := NewService()
+	_, err := svc.RenameProfile("missing", "new", []ToolName{ToolCodex})
+	if err == nil {
+		t.Fatalf("expected error for missing source profile")
+	}
+	if ExitCode(err) != ExitUserError {
+		t.Fatalf("expected exit code %d, got %d (err=%v)", ExitUserError, ExitCode(err), err)
+	}
+}
+
+func TestRenameProfileFailsWhenTargetExistsInStrictMode(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	paths, err := resolveToolPaths(ToolCodex)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := saveProfile(paths, "old", Credential{Provider: "openai-codex", Access: "a", Refresh: "r"}, true); err != nil {
+		t.Fatalf("save old profile: %v", err)
+	}
+	if err := saveProfile(paths, "new", Credential{Provider: "openai-codex", Access: "x", Refresh: "y"}, true); err != nil {
+		t.Fatalf("save new profile: %v", err)
+	}
+
+	svc := NewService()
+	_, err = svc.RenameProfile("old", "new", []ToolName{ToolCodex})
+	if err == nil {
+		t.Fatalf("expected error when target profile exists")
+	}
+	if ExitCode(err) != ExitUserError {
+		t.Fatalf("expected exit code %d, got %d (err=%v)", ExitUserError, ExitCode(err), err)
+	}
+
+	if _, err := loadProfile(paths, "old"); err != nil {
+		t.Fatalf("expected old profile unchanged, got err=%v", err)
+	}
+}
+
+func TestRenameProfileOpenClawUpdatesStateAndLeavesStoreUntouched(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := saveProfile(paths, "buy1", Credential{Provider: "openai-codex", Access: "a", Refresh: "r"}, true); err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "buy1", PreviousProfile: "buy1", PendingCreateProfile: "buy1", PendingCreateSince: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	store := map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			"openai-codex:default": map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "a",
+				"refresh":   "r",
+				"accountId": "acct-1",
+			},
+			"openai-codex:manual": map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "x",
+				"refresh":   "y",
+				"accountId": "acct-2",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{"openai-codex:default", "openai-codex:manual"},
+		},
+	}
+	if err := writeJSONAtomic(paths.ActivePath, store); err != nil {
+		t.Fatalf("write openclaw store: %v", err)
+	}
+
+	originalStore, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		t.Fatalf("read original openclaw store: %v", err)
+	}
+
+	svc := NewService()
+	if _, err := svc.RenameProfile("buy1", "buy2", []ToolName{ToolOpenClaw}); err != nil {
+		t.Fatalf("rename profile failed: %v", err)
+	}
+
+	updatedStore, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		t.Fatalf("read openclaw store: %v", err)
+	}
+	if len(updatedStore.Profiles) != len(originalStore.Profiles) {
+		t.Fatalf("expected openclaw profiles unchanged, before=%d after=%d", len(originalStore.Profiles), len(updatedStore.Profiles))
+	}
+	if len(updatedStore.Order["openai-codex"]) != len(originalStore.Order["openai-codex"]) {
+		t.Fatalf("expected openclaw order unchanged, before=%+v after=%+v", originalStore.Order["openai-codex"], updatedStore.Order["openai-codex"])
+	}
+	if updatedStore.Order["openai-codex"][0] != "openai-codex:default" {
+		t.Fatalf("expected active order to remain default, got %+v", updatedStore.Order["openai-codex"])
+	}
+
+	state, err := loadState(paths)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.ActiveProfile != "buy2" || state.PreviousProfile != "buy2" || state.PendingCreateProfile != "buy2" {
+		t.Fatalf("expected state references renamed for openclaw, got %+v", state)
+	}
+}
+
+func TestMigrateOpenClawMigratesLegacyRotaterStore(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	store := map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			"openai-codex:rotater:buy1": map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "legacy-access",
+				"refresh":   "legacy-refresh",
+				"accountId": "acct-legacy",
+			},
+			"openai-codex:manual": map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "manual-access",
+				"refresh":   "manual-refresh",
+				"accountId": "acct-manual",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{"openai-codex:rotater:buy1", openClawLegacyPendingLoginSentinelID, "openai-codex:manual"},
+		},
+		openClawLegacyPendingKnownIDsKey: []string{"openai-codex:rotater:buy1", "openai-codex:manual"},
+	}
+	if err := writeJSONAtomic(paths.ActivePath, store); err != nil {
+		t.Fatalf("write legacy store: %v", err)
+	}
+
+	svc := NewService()
+	result, err := svc.MigrateOpenClaw()
+	if err != nil {
+		t.Fatalf("migrate openclaw failed: %v", err)
+	}
+	if result.Status != "migrated" || !result.Changed {
+		t.Fatalf("expected migrated result, got %+v", result)
+	}
+	if result.RemovedLegacyRotater != 1 {
+		t.Fatalf("expected one legacy rotater removed, got %d", result.RemovedLegacyRotater)
+	}
+	if !result.RemovedPendingSentinel || !result.RemovedPendingKnownState {
+		t.Fatalf("expected legacy pending markers removed, got %+v", result)
+	}
+	if !result.ManagedProfileSet {
+		t.Fatalf("expected managed profile set, got %+v", result)
+	}
+
+	updated, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		t.Fatalf("read migrated store: %v", err)
+	}
+	if _, ok := updated.Profiles["openai-codex:rotater:buy1"]; ok {
+		t.Fatalf("expected legacy rotater profile removed")
+	}
+	managed, ok := updated.Profiles[openClawManagedProfileID]
+	if !ok {
+		t.Fatalf("expected managed profile present")
+	}
+	if managed.Access != "legacy-access" || managed.Refresh != "legacy-refresh" || managed.AccountID != "acct-legacy" {
+		t.Fatalf("expected managed profile from active legacy credential, got %+v", managed)
+	}
+	order := updated.Order["openai-codex"]
+	if len(order) != 1 || order[0] != openClawManagedProfileID {
+		t.Fatalf("expected single managed active order, got %+v", order)
+	}
+	if _, ok := updated.Raw[openClawLegacyPendingKnownIDsKey]; ok {
+		t.Fatalf("expected pending known marker removed")
+	}
+}
+
+func TestMigrateOpenClawNoStore(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	svc := NewService()
+	result, err := svc.MigrateOpenClaw()
+	if err != nil {
+		t.Fatalf("migrate openclaw failed: %v", err)
+	}
+	if result.Status != "no_store" || result.Changed {
+		t.Fatalf("expected no_store with no changes, got %+v", result)
+	}
+}
+
+func TestMigrateOpenClawNoChanges(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	store := map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			openClawManagedProfileID: map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "managed-access",
+				"refresh":   "managed-refresh",
+				"accountId": "acct-managed",
+				"clientId":  "app_EMoamEEZ73f0CkXaXp7hrann",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{openClawManagedProfileID},
+		},
+	}
+	if err := writeJSONAtomic(paths.ActivePath, store); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+
+	svc := NewService()
+	result, err := svc.MigrateOpenClaw()
+	if err != nil {
+		t.Fatalf("migrate openclaw failed: %v", err)
+	}
+	if result.Status != "no_changes" || result.Changed {
+		t.Fatalf("expected no_changes, got %+v", result)
 	}
 }
 

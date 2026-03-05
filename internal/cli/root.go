@@ -28,9 +28,38 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newSwitchCommand(svc))
 	root.AddCommand(newUsageCommand(svc))
 	root.AddCommand(newProfilesCommand(svc))
+	root.AddCommand(newMigrateOpenClawCommand(svc))
 	root.AddCommand(newUpdateCommand(svc))
 
 	return root
+}
+
+func newMigrateOpenClawCommand(svc *app.Service) *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "migrate-openclaw",
+		Short: "Migrate OpenClaw auth store to managed single-profile mode",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := svc.MigrateOpenClaw()
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return printJSON(result)
+			}
+			switch result.Status {
+			case "no_store":
+				fmt.Println("openclaw: no auth store found, nothing to migrate")
+			case "no_changes":
+				fmt.Println("openclaw: no migration needed")
+			default:
+				fmt.Printf("openclaw: migrated (removed_rotater_profiles=%d, removed_pending_sentinel=%t, removed_pending_known_marker=%t, managed_profile_set=%t)\n", result.RemovedLegacyRotater, result.RemovedPendingSentinel, result.RemovedPendingKnownState, result.ManagedProfileSet)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
+	return cmd
 }
 
 func newUpdateCommand(svc *app.Service) *cobra.Command {
@@ -308,10 +337,29 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 				return printJSON(results)
 			}
 
+			activeProfiles := map[app.ToolName]string{}
+			statusTools := selectedTools
+			if len(statusTools) == 0 {
+				statusTools = append([]app.ToolName{}, app.AllTools...)
+			}
+			if statusResults, statusErr := svc.Status(statusTools); statusErr == nil {
+				for _, item := range statusResults {
+					activeProfiles[item.Tool] = strings.TrimSpace(item.ActiveProfile)
+				}
+			}
+
+			formatUsageLabel := func(item app.UsageResult) string {
+				profileName := item.Profile
+				if activeName, ok := activeProfiles[item.Tool]; ok && activeName != "" && profileName == activeName {
+					profileName = profileName + " (active)"
+				}
+				return fmt.Sprintf("%s/%s", item.Tool, profileName)
+			}
+
 			summary := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(summary, "profile\tplan\taccount\tcredits")
 			for _, item := range results {
-				label := fmt.Sprintf("%s/%s", item.Tool, item.Profile)
+				label := formatUsageLabel(item)
 				plan := "N/A"
 				if item.Status == "ok" {
 					plan = zeroDefault(item.Plan, "unknown")
@@ -334,7 +382,7 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 					_, _ = fmt.Fprintln(windows, "----------\t------\t------\t---------------------\t----------------")
 				}
 
-				label := fmt.Sprintf("%s/%s", item.Tool, item.Profile)
+				label := formatUsageLabel(item)
 				if item.Status != "ok" {
 					errText := strings.ReplaceAll(strings.TrimSpace(item.Error), "\n", " ")
 					if errText == "" {
@@ -381,6 +429,7 @@ func newProfilesCommand(svc *app.Service) *cobra.Command {
 	}
 	profiles.AddCommand(newProfilesListCommand(svc))
 	profiles.AddCommand(newProfilesDeleteCommand(svc))
+	profiles.AddCommand(newProfilesRenameCommand(svc))
 	return profiles
 }
 
@@ -437,6 +486,39 @@ func newProfilesDeleteCommand(svc *app.Service) *cobra.Command {
 				return printJSON(map[string]any{"deleted": name, "tools": tools})
 			}
 			fmt.Printf("deleted profile %q for tools: %s\n", name, strings.Join(toStrings(tools), ","))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&toolCSV, "tools", "", "Comma-separated tools: codex,opencode,openclaw")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
+	return cmd
+}
+
+func newProfilesRenameCommand(svc *app.Service) *cobra.Command {
+	var toolCSV string
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:     "rename <from> <to>",
+		Aliases: []string{"mv"},
+		Short:   "Rename profile files",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tools, err := app.ParseTools(toolCSV)
+			if err != nil {
+				return app.WrapExit(app.ExitUserError, err)
+			}
+			from := strings.TrimSpace(args[0])
+			to := strings.TrimSpace(args[1])
+			results, err := svc.RenameProfile(from, to, tools)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return printJSON(results)
+			}
+			for _, item := range results {
+				fmt.Printf("%s: renamed %q -> %q\n", item.Tool, item.FromProfile, item.ToProfile)
+			}
 			return nil
 		},
 	}

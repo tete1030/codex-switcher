@@ -11,8 +11,18 @@ import (
 
 type openClawAdapter struct{}
 
-const openClawPendingLoginSentinelID = "openai-codex:rotater:__pending_login__"
-const openClawPendingKnownIDsKey = "codex_switcher_pending_known_profile_ids"
+const openClawManagedProfileID = "openai-codex:default"
+const openClawLegacyPendingLoginSentinelID = "openai-codex:rotater:__pending_login__"
+const openClawLegacyPendingKnownIDsKey = "codex_switcher_pending_known_profile_ids"
+
+type openClawMigrationStats struct {
+	HasStore                  bool
+	Changed                   bool
+	ManagedProfileSet         bool
+	RemovedLegacyRotater      int
+	RemovedPendingSentinel    bool
+	RemovedPendingKnownMarker bool
+}
 
 func (a *openClawAdapter) Tool() ToolName { return ToolOpenClaw }
 
@@ -61,96 +71,19 @@ func (a *openClawAdapter) ReadActiveCredential(paths ToolPaths) (Credential, boo
 		return Credential{}, false, err
 	}
 
-	order := activeOpenClawOrder(store)
-	hasPendingSentinel := false
-	now := time.Now().UnixMilli()
-	for _, id := range order {
-		if id == openClawPendingLoginSentinelID {
-			hasPendingSentinel = true
-			continue
+	if entry, ok := store.Profiles[openClawManagedProfileID]; ok {
+		if cred, ok := activeCredentialFromOpenClawEntry(entry); ok {
+			return cred, true, nil
 		}
+	}
+
+	for _, id := range activeOpenClawOrder(store) {
 		entry, ok := store.Profiles[id]
 		if !ok {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
-			continue
-		}
-		if entry.Type == "oauth" {
-			if entry.Access == "" || entry.Refresh == "" {
-				continue
-			}
-			return normalizeCredentialIdentity(Credential{
-				Provider:  "openai-codex",
-				Access:    entry.Access,
-				Refresh:   entry.Refresh,
-				Expires:   entry.Expires,
-				AccountID: entry.AccountID,
-				Email:     entry.Email,
-			}), true, nil
-		}
-		if entry.Type == "token" {
-			if entry.Token == "" {
-				continue
-			}
-			if entry.Expires > 0 && now >= entry.Expires {
-				continue
-			}
-			return normalizeCredentialIdentity(Credential{
-				Provider: "openai-codex",
-				Access:   entry.Token,
-				Expires:  entry.Expires,
-				Email:    entry.Email,
-			}), true, nil
-		}
-	}
-
-	if hasPendingSentinel {
-		known := pendingKnownOpenClawProfileIDs(store)
-		ids := make([]string, 0, len(store.Profiles))
-		for id := range store.Profiles {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-
-		for _, id := range ids {
-			if id == openClawPendingLoginSentinelID {
-				continue
-			}
-			if _, seen := known[id]; seen {
-				continue
-			}
-			entry := store.Profiles[id]
-			if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
-				continue
-			}
-			if entry.Type == "oauth" {
-				if entry.Access == "" || entry.Refresh == "" {
-					continue
-				}
-				return normalizeCredentialIdentity(Credential{
-					Provider:  "openai-codex",
-					Access:    entry.Access,
-					Refresh:   entry.Refresh,
-					Expires:   entry.Expires,
-					AccountID: entry.AccountID,
-					Email:     entry.Email,
-				}), true, nil
-			}
-			if entry.Type == "token" {
-				if entry.Token == "" {
-					continue
-				}
-				if entry.Expires > 0 && now >= entry.Expires {
-					continue
-				}
-				return normalizeCredentialIdentity(Credential{
-					Provider: "openai-codex",
-					Access:   entry.Token,
-					Expires:  entry.Expires,
-					Email:    entry.Email,
-				}), true, nil
-			}
+		if cred, ok := activeCredentialFromOpenClawEntry(entry); ok {
+			return cred, true, nil
 		}
 	}
 
@@ -183,16 +116,10 @@ func (a *openClawAdapter) ClearActiveCredential(paths ToolPaths) error {
 		store.Raw = map[string]any{}
 	}
 
-	store.Order["openai-codex"] = []string{openClawPendingLoginSentinelID}
-	known := make([]string, 0)
-	for id, entry := range store.Profiles {
-		if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
-			continue
-		}
-		known = append(known, id)
-	}
-	sort.Strings(known)
-	store.Raw[openClawPendingKnownIDsKey] = known
+	cleanupLegacyOpenClawPendingMarkers(&store)
+	delete(store.Profiles, openClawManagedProfileID)
+	store.Order["openai-codex"] = []string{}
+	delete(store.Raw, openClawLegacyPendingKnownIDsKey)
 
 	if store.Version == 0 {
 		store.Version = 1
@@ -201,6 +128,7 @@ func (a *openClawAdapter) ClearActiveCredential(paths ToolPaths) error {
 }
 
 func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, cred Credential) error {
+	_ = profileName
 	store, err := readOpenClawStore(paths.ActivePath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -215,8 +143,9 @@ func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, 
 		store.Raw = map[string]any{}
 	}
 
-	profileID := "openai-codex:rotater:" + profileName
-	store.Profiles[profileID] = openClawCredential{
+	cleanupLegacyOpenClawPendingMarkers(&store)
+	removeLegacySwitcherOpenClawProfiles(&store)
+	store.Profiles[openClawManagedProfileID] = openClawCredential{
 		Type:      "oauth",
 		Provider:  "openai-codex",
 		Access:    cred.Access,
@@ -226,25 +155,95 @@ func (a *openClawAdapter) WriteWithProfile(paths ToolPaths, profileName string, 
 		ClientID:  "app_EMoamEEZ73f0CkXaXp7hrann",
 		Email:     cred.Email,
 	}
-
-	existing := store.Order["openai-codex"]
-	merged := []string{profileID}
-	for _, id := range existing {
-		if id == profileID {
-			continue
-		}
-		if id == openClawPendingLoginSentinelID {
-			continue
-		}
-		merged = append(merged, id)
-	}
-	store.Order["openai-codex"] = dedupeStrings(merged)
-	delete(store.Raw, openClawPendingKnownIDsKey)
+	store.Order["openai-codex"] = []string{openClawManagedProfileID}
+	delete(store.Raw, openClawLegacyPendingKnownIDsKey)
 
 	if store.Version == 0 {
 		store.Version = 1
 	}
 	return writeOpenClawStore(paths.ActivePath, store)
+}
+
+func migrateOpenClawStore(paths ToolPaths) (openClawMigrationStats, error) {
+	stats := openClawMigrationStats{}
+
+	store, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return stats, nil
+		}
+		return stats, err
+	}
+	stats.HasStore = true
+
+	if store.Profiles == nil {
+		store.Profiles = map[string]openClawCredential{}
+	}
+	if store.Order == nil {
+		store.Order = map[string][]string{}
+	}
+	if store.Raw == nil {
+		store.Raw = map[string]any{}
+	}
+
+	beforeLegacyCount := countLegacySwitcherOpenClawProfiles(store)
+	beforeSentinel := orderContainsID(store.Order["openai-codex"], openClawLegacyPendingLoginSentinelID)
+	_, beforePendingKnown := store.Raw[openClawLegacyPendingKnownIDsKey]
+	beforeManaged, hadManaged := store.Profiles[openClawManagedProfileID]
+	beforeOrder := append([]string{}, store.Order["openai-codex"]...)
+	beforeVersion := store.Version
+
+	preferred, hasPreferred := selectPreferredOpenClawCredentialEntry(store)
+
+	cleanupLegacyOpenClawPendingMarkers(&store)
+	removeLegacySwitcherOpenClawProfiles(&store)
+
+	if hasPreferred {
+		store.Profiles[openClawManagedProfileID] = preferred
+		store.Order["openai-codex"] = []string{openClawManagedProfileID}
+		stats.ManagedProfileSet = true
+	} else {
+		delete(store.Profiles, openClawManagedProfileID)
+		store.Order["openai-codex"] = []string{}
+	}
+
+	if store.Version == 0 {
+		store.Version = 1
+	}
+	stats.RemovedLegacyRotater = beforeLegacyCount - countLegacySwitcherOpenClawProfiles(store)
+	stats.RemovedPendingSentinel = beforeSentinel && !orderContainsID(store.Order["openai-codex"], openClawLegacyPendingLoginSentinelID)
+	_, afterPendingKnown := store.Raw[openClawLegacyPendingKnownIDsKey]
+	stats.RemovedPendingKnownMarker = beforePendingKnown && !afterPendingKnown
+
+	if beforeVersion == 0 && store.Version != 0 {
+		stats.Changed = true
+	}
+	if stats.RemovedLegacyRotater > 0 || stats.RemovedPendingSentinel || stats.RemovedPendingKnownMarker {
+		stats.Changed = true
+	}
+	if hasPreferred {
+		if !hadManaged || beforeManaged != preferred {
+			stats.Changed = true
+		}
+		if !stringSliceEqual(beforeOrder, []string{openClawManagedProfileID}) {
+			stats.Changed = true
+		}
+	} else {
+		if hadManaged {
+			stats.Changed = true
+		}
+		if len(beforeOrder) > 0 {
+			stats.Changed = true
+		}
+	}
+
+	if !stats.Changed {
+		return stats, nil
+	}
+	if err := writeOpenClawStore(paths.ActivePath, store); err != nil {
+		return stats, err
+	}
+	return stats, nil
 }
 
 func readOpenClawStore(path string) (openClawStore, error) {
@@ -306,46 +305,19 @@ func writeOpenClawStore(path string, store openClawStore) error {
 	return writeJSONAtomic(path, raw)
 }
 
-func removeOpenClawRotaterProfile(paths ToolPaths, profileName string) error {
-	store, err := readOpenClawStore(paths.ActivePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if store.Profiles == nil {
-		store.Profiles = map[string]openClawCredential{}
-	}
-	if store.Order == nil {
-		store.Order = map[string][]string{}
-	}
-
-	targetID := "openai-codex:rotater:" + profileName
-	delete(store.Profiles, targetID)
-
-	if order, ok := store.Order["openai-codex"]; ok {
-		next := make([]string, 0, len(order))
-		for _, id := range order {
-			if id == targetID {
+func activeOpenClawOrder(store openClawStore) []string {
+	if list, ok := store.Order["openai-codex"]; ok {
+		ordered := dedupeStrings(list)
+		out := make([]string, 0, len(ordered))
+		for _, id := range ordered {
+			if id == openClawLegacyPendingLoginSentinelID {
 				continue
 			}
-			next = append(next, id)
+			out = append(out, id)
 		}
-		if len(next) == 0 {
-			delete(store.Order, "openai-codex")
-		} else {
-			store.Order["openai-codex"] = next
-		}
+		return out
 	}
 
-	return writeOpenClawStore(paths.ActivePath, store)
-}
-
-func activeOpenClawOrder(store openClawStore) []string {
-	if list := store.Order["openai-codex"]; len(list) > 0 {
-		return dedupeStrings(list)
-	}
 	ids := make([]string, 0)
 	for id, cred := range store.Profiles {
 		if strings.ToLower(strings.TrimSpace(cred.Provider)) == "openai-codex" {
@@ -369,24 +341,161 @@ func dedupeStrings(values []string) []string {
 	return out
 }
 
-func pendingKnownOpenClawProfileIDs(store openClawStore) map[string]struct{} {
-	out := map[string]struct{}{}
+func activeCredentialFromOpenClawEntry(entry openClawCredential) (Credential, bool) {
+	if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
+		return Credential{}, false
+	}
+	if entry.Type == "oauth" {
+		if entry.Access == "" || entry.Refresh == "" {
+			return Credential{}, false
+		}
+		return normalizeCredentialIdentity(Credential{
+			Provider:  "openai-codex",
+			Access:    entry.Access,
+			Refresh:   entry.Refresh,
+			Expires:   entry.Expires,
+			AccountID: entry.AccountID,
+			Email:     entry.Email,
+		}), true
+	}
+	if entry.Type == "token" {
+		if entry.Token == "" {
+			return Credential{}, false
+		}
+		now := time.Now().UnixMilli()
+		if entry.Expires > 0 && now >= entry.Expires {
+			return Credential{}, false
+		}
+		return normalizeCredentialIdentity(Credential{
+			Provider: "openai-codex",
+			Access:   entry.Token,
+			Expires:  entry.Expires,
+			Email:    entry.Email,
+		}), true
+	}
+	return Credential{}, false
+}
+
+func cleanupLegacyOpenClawPendingMarkers(store *openClawStore) {
+	if store == nil {
+		return
+	}
+	if store.Order == nil {
+		store.Order = map[string][]string{}
+	}
 	if store.Raw == nil {
-		return out
+		store.Raw = map[string]any{}
 	}
-	rawIDs, ok := store.Raw[openClawPendingKnownIDsKey]
-	if !ok {
-		return out
+
+	if list, ok := store.Order["openai-codex"]; ok {
+		next := make([]string, 0, len(list))
+		for _, id := range list {
+			if strings.TrimSpace(id) == "" {
+				continue
+			}
+			if id == openClawLegacyPendingLoginSentinelID {
+				continue
+			}
+			next = append(next, id)
+		}
+		store.Order["openai-codex"] = dedupeStrings(next)
 	}
-	list, ok := rawIDs.([]any)
-	if !ok {
-		return out
+
+	delete(store.Raw, openClawLegacyPendingKnownIDsKey)
+}
+
+func removeLegacySwitcherOpenClawProfiles(store *openClawStore) {
+	if store == nil || store.Profiles == nil {
+		return
 	}
-	for _, item := range list {
-		s, ok := item.(string)
-		if ok && strings.TrimSpace(s) != "" {
-			out[s] = struct{}{}
+	for id := range store.Profiles {
+		if strings.HasPrefix(id, "openai-codex:rotater:") {
+			delete(store.Profiles, id)
 		}
 	}
-	return out
+}
+
+func countLegacySwitcherOpenClawProfiles(store openClawStore) int {
+	count := 0
+	for id := range store.Profiles {
+		if strings.HasPrefix(id, "openai-codex:rotater:") {
+			count++
+		}
+	}
+	return count
+}
+
+func orderContainsID(order []string, id string) bool {
+	for _, item := range order {
+		if item == id {
+			return true
+		}
+	}
+	return false
+}
+
+func selectPreferredOpenClawCredentialEntry(store openClawStore) (openClawCredential, bool) {
+	if entry, ok := store.Profiles[openClawManagedProfileID]; ok && openClawCredentialUsable(entry) {
+		return normalizeOpenClawCredential(entry), true
+	}
+
+	for _, id := range activeOpenClawOrder(store) {
+		entry, ok := store.Profiles[id]
+		if !ok || !openClawCredentialUsable(entry) {
+			continue
+		}
+		return normalizeOpenClawCredential(entry), true
+	}
+
+	ids := make([]string, 0, len(store.Profiles))
+	for id := range store.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		entry := store.Profiles[id]
+		if !openClawCredentialUsable(entry) {
+			continue
+		}
+		return normalizeOpenClawCredential(entry), true
+	}
+
+	return openClawCredential{}, false
+}
+
+func openClawCredentialUsable(entry openClawCredential) bool {
+	if strings.ToLower(strings.TrimSpace(entry.Provider)) != "openai-codex" {
+		return false
+	}
+	if entry.Type == "oauth" {
+		return entry.Access != "" && entry.Refresh != ""
+	}
+	if entry.Type == "token" {
+		if entry.Token == "" {
+			return false
+		}
+		now := time.Now().UnixMilli()
+		return entry.Expires <= 0 || now < entry.Expires
+	}
+	return false
+}
+
+func normalizeOpenClawCredential(entry openClawCredential) openClawCredential {
+	entry.Provider = "openai-codex"
+	if entry.Type == "oauth" && strings.TrimSpace(entry.ClientID) == "" {
+		entry.ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	}
+	return entry
+}
+
+func stringSliceEqual(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

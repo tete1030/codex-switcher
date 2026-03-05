@@ -348,12 +348,9 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 				}
 			}
 
+			toolCounts := usageToolResultCounts(results)
 			formatUsageLabel := func(item app.UsageResult) string {
-				profileName := item.Profile
-				if activeName, ok := activeProfiles[item.Tool]; ok && activeName != "" && profileName == activeName {
-					profileName = profileName + " (active)"
-				}
-				return fmt.Sprintf("%s/%s", item.Tool, profileName)
+				return usageDisplayLabel(item, activeProfiles, toolCounts)
 			}
 
 			summary := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -420,6 +417,24 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 	cmd.Flags().StringVar(&toolsCSV, "tools", "", "Comma-separated tools: codex,opencode,openclaw")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
 	return cmd
+}
+
+func usageToolResultCounts(results []app.UsageResult) map[app.ToolName]int {
+	counts := make(map[app.ToolName]int, len(app.AllTools))
+	for _, item := range results {
+		counts[item.Tool]++
+	}
+	return counts
+}
+
+func usageDisplayLabel(item app.UsageResult, activeProfiles map[app.ToolName]string, toolCounts map[app.ToolName]int) string {
+	profileName := item.Profile
+	if toolCounts[item.Tool] > 1 {
+		if activeName, ok := activeProfiles[item.Tool]; ok && activeName != "" && profileName == activeName {
+			profileName = profileName + " (active)"
+		}
+	}
+	return fmt.Sprintf("%s/%s", item.Tool, profileName)
 }
 
 func newProfilesCommand(svc *app.Service) *cobra.Command {

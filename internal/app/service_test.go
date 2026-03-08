@@ -411,6 +411,79 @@ func TestSwitchSameActiveProfileRepairsMissingActiveWithoutSnapshot(t *testing.T
 	}
 }
 
+func TestSwitchOpenClawStaleStateRewritesActiveCredential(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	t.Setenv("OPENCLAW_AGENT_DIR", agentDir)
+
+	paths, err := resolveToolPaths(ToolOpenClaw)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := saveProfile(paths, "my", Credential{Provider: "openai-codex", Access: "my-access", Refresh: "my-refresh", AccountID: "acct-my"}, true); err != nil {
+		t.Fatalf("save my profile: %v", err)
+	}
+	if err := saveProfile(paths, "buy1", Credential{Provider: "openai-codex", Access: "buy1-access", Refresh: "buy1-refresh", AccountID: "acct-buy1"}, true); err != nil {
+		t.Fatalf("save buy1 profile: %v", err)
+	}
+	if err := writeJSONAtomic(paths.ActivePath, map[string]any{
+		"version": 1,
+		"profiles": map[string]any{
+			openClawManagedProfileID: map[string]any{
+				"type":      "oauth",
+				"provider":  "openai-codex",
+				"access":    "buy1-access",
+				"refresh":   "buy1-refresh",
+				"accountId": "acct-buy1",
+			},
+		},
+		"order": map[string]any{
+			"openai-codex": []string{openClawManagedProfileID},
+		},
+	}); err != nil {
+		t.Fatalf("write openclaw active store: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "my", PreviousProfile: "buy1"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	results, err := svc.Switch("my", []ToolName{ToolOpenClaw}, SwitchOptions{})
+	if err != nil {
+		t.Fatalf("switch failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one switch result, got %d", len(results))
+	}
+	if results[0].Status != "switched" {
+		t.Fatalf("expected switched status for stale-state openclaw switch, got %q", results[0].Status)
+	}
+	if !results[0].Changed {
+		t.Fatalf("expected changed=true when stale-state openclaw switch rewrites active auth")
+	}
+
+	store, err := readOpenClawStore(paths.ActivePath)
+	if err != nil {
+		t.Fatalf("read openclaw store: %v", err)
+	}
+	managed := store.Profiles[openClawManagedProfileID]
+	if managed.Access != "my-access" || managed.Refresh != "my-refresh" || managed.AccountID != "acct-my" {
+		t.Fatalf("expected openclaw active store rewritten to my profile, got %+v", managed)
+	}
+
+	updatedState, err := loadState(paths)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if updatedState.ActiveProfile != "my" {
+		t.Fatalf("expected active profile my, got %q", updatedState.ActiveProfile)
+	}
+	if updatedState.ActiveCredentialHash == "" {
+		t.Fatalf("expected active credential hash recorded after switch")
+	}
+}
+
 func TestRenameProfileRenamesNonActiveProfile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))

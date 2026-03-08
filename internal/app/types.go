@@ -53,6 +53,7 @@ type ProfileFile struct {
 type StateFile struct {
 	Version              int    `json:"version"`
 	ActiveProfile        string `json:"activeProfile,omitempty"`
+	ActiveCredentialHash string `json:"activeCredentialHash,omitempty"`
 	PreviousProfile      string `json:"previousProfile,omitempty"`
 	LastSwitchAt         string `json:"lastSwitchAt,omitempty"`
 	PendingCreateProfile string `json:"pendingCreateProfile,omitempty"`

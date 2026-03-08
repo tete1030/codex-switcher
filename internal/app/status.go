@@ -46,7 +46,7 @@ func (s *Service) Status(tools []ToolName) ([]StatusToolResult, error) {
 			StoreMode:            inspect.StoreMode,
 			SwitchBlocked:        inspect.SwitchBlocked,
 			SwitchBlockReason:    inspect.SwitchBlockReason,
-			ActiveProfile:        state.ActiveProfile,
+			ActiveProfile:        activeProfileForDisplay(paths, adapter, state),
 			PreviousProfile:      state.PreviousProfile,
 			PendingCreateProfile: state.PendingCreateProfile,
 			PendingCreateSince:   state.PendingCreateSince,

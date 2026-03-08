@@ -125,7 +125,7 @@ func (s *Service) Capture(profile string, tools []ToolName, force bool) ([]Inspe
 		if state.ActiveProfile != profile {
 			state.PreviousProfile = state.ActiveProfile
 		}
-		state.ActiveProfile = profile
+		setActiveProfileTracking(&state, profile, cred)
 		state.PendingCreateProfile = ""
 		state.PendingCreateSince = ""
 		state.LastSwitchAt = time.Now().UTC().Format(time.RFC3339)
@@ -325,11 +325,14 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 		})
 
 		sameActiveTarget := t.action == "switch" && !t.materialize && oldState.ActiveProfile == profile
+		if sameActiveTarget && t.tool == ToolOpenClaw {
+			sameActiveTarget = hadCred && credentialsLikelyMatch(oldCred, t.cred)
+		}
 		if sameActiveTarget {
 			status := "already_active"
 			changed := false
 
-			if hadCred && oldCred.Refresh != "" && oldCred.Access != "" {
+			if oldCred.Refresh != "" && oldCred.Access != "" {
 				if err := saveProfile(t.paths, profile, oldCred, true); err != nil {
 					s.rollback(rollback)
 					return nil, WrapExit(ExitIOFailure, err)
@@ -357,7 +360,7 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 
 			newState := oldState
 			newState.Version = 1
-			newState.ActiveProfile = profile
+			setActiveProfileTracking(&newState, profile, oldCred)
 			newState.PendingCreateProfile = ""
 			newState.PendingCreateSince = ""
 			newState.LastSwitchAt = time.Now().UTC().Format(time.RFC3339)
@@ -427,11 +430,11 @@ func (s *Service) Switch(profile string, tools []ToolName, opts SwitchOptions) (
 			LastSwitchAt:    time.Now().UTC().Format(time.RFC3339),
 		}
 		if t.action == "switch" {
-			newState.ActiveProfile = profile
+			setActiveProfileTracking(&newState, profile, t.cred)
 			newState.PendingCreateProfile = ""
 			newState.PendingCreateSince = ""
 		} else {
-			newState.ActiveProfile = ""
+			clearActiveProfileTracking(&newState)
 			newState.PendingCreateProfile = profile
 			newState.PendingCreateSince = time.Now().UTC().Format(time.RFC3339)
 		}
@@ -663,7 +666,7 @@ func (s *Service) DeleteProfile(name string, tools []ToolName) error {
 		}
 		changed := false
 		if state.ActiveProfile == name {
-			state.ActiveProfile = ""
+			clearActiveProfileTracking(&state)
 			changed = true
 		}
 		if state.PreviousProfile == name {

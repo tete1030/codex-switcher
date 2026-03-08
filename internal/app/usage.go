@@ -98,12 +98,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 		resolvedPendingProfile := false
 
 		for _, name := range profilesToLoad {
-			preferredActiveProfile := ""
-			if defaultActiveQuery && name == "__active__" {
-				preferredActiveProfile = firstNonEmpty(state.ActiveProfile, state.PendingCreateProfile)
-			}
-
-			cred, sourceLabel, resolveErr := resolveUsageCredential(tool, paths, adapter, name, preferredActiveProfile, state.PendingCreateProfile)
+			cred, sourceLabel, sourceVerified, resolveErr := resolveUsageCredential(paths, adapter, name, state, defaultActiveQuery)
 			if resolveErr != nil {
 				results = append(results, UsageResult{
 					Tool:     tool,
@@ -143,7 +138,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 			hadSuccess = true
 			if name != "__active__" {
 				lastSuccessProfile = name
-			} else if sourceLabel != unknownProfileName {
+			} else if sourceVerified && sourceLabel != unknownProfileName {
 				lastSuccessProfile = sourceLabel
 			}
 
@@ -151,7 +146,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 				if name != "__active__" {
 					_ = saveProfile(paths, name, newCred, true)
 					stateAfterRefresh, _ := loadState(paths)
-					if stateAfterRefresh.ActiveProfile == name {
+					if activeProfileForDisplay(paths, adapter, stateAfterRefresh) == name {
 						if tool == ToolOpenClaw {
 							oa, ok := adapter.(*openClawAdapter)
 							if ok {
@@ -162,14 +157,14 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 						}
 					}
 				} else {
-					if sourceLabel != unknownProfileName {
+					if sourceVerified && sourceLabel != unknownProfileName {
 						_ = saveProfile(paths, sourceLabel, newCred, true)
 					}
 					_ = adapter.WriteActiveCredential(paths, newCred)
 				}
 			}
 
-			if name == "__active__" && sourceLabel != unknownProfileName {
+			if name == "__active__" && sourceVerified && sourceLabel != unknownProfileName {
 				synced := cred
 				if refreshed {
 					synced = newCred
@@ -193,9 +188,11 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 			state.PendingCreateProfile = ""
 			state.PendingCreateSince = ""
 			if opts.Profile != "" {
-				state.ActiveProfile = opts.Profile
+				setActiveProfileTracking(&state, opts.Profile, Credential{})
+				state.ActiveCredentialHash = ""
 			} else if lastSuccessProfile != "" {
-				state.ActiveProfile = lastSuccessProfile
+				setActiveProfileTracking(&state, lastSuccessProfile, Credential{})
+				state.ActiveCredentialHash = ""
 			} else if state.ActiveProfile == "" {
 				state.ActiveProfile = pendingProfile
 			}
@@ -262,33 +259,33 @@ func usageProfileLabel(name string) string {
 	return name
 }
 
-func resolveUsageCredential(tool ToolName, paths ToolPaths, adapter Adapter, name string, preferredActiveProfile string, pendingCreateProfile string) (Credential, string, error) {
+func resolveUsageCredential(paths ToolPaths, adapter Adapter, name string, state StateFile, defaultActiveQuery bool) (Credential, string, bool, error) {
 	if name == "__active__" {
 		cred, ok, err := adapter.ReadActiveCredential(paths)
 		if err != nil {
-			return Credential{}, unknownProfileName, err
+			return Credential{}, unknownProfileName, false, err
 		}
 		if !ok {
-			return Credential{}, unknownProfileName, fmt.Errorf("no active credential available")
+			return Credential{}, unknownProfileName, false, fmt.Errorf("no active credential available")
 		}
-		if preferredActiveProfile != "" && shouldUsePreferredActiveProfile(paths, cred, preferredActiveProfile, pendingCreateProfile) {
-			return cred, preferredActiveProfile, nil
-		}
-		if matched := guessActiveProfileName(paths, cred); matched != "" {
-			return cred, matched, nil
-		}
-		if tool == ToolOpenClaw && preferredActiveProfile != "" && preferredActiveProfile != unknownProfileName {
-			if _, err := loadProfile(paths, preferredActiveProfile); err == nil {
-				return cred, preferredActiveProfile, nil
+		if defaultActiveQuery {
+			if verified := verifiedStateActiveProfile(paths, state, cred); verified != "" {
+				return cred, verified, true, nil
+			}
+			if state.PendingCreateProfile != "" && shouldUsePreferredActiveProfile(paths, cred, state.PendingCreateProfile, state.PendingCreateProfile) {
+				return cred, state.PendingCreateProfile, true, nil
 			}
 		}
-		return cred, unknownProfileName, nil
+		if matched := uniqueMatchingProfileName(paths, cred); matched != "" {
+			return cred, matched, true, nil
+		}
+		return cred, unknownProfileName, false, nil
 	}
 	cred, err := loadProfile(paths, name)
 	if err != nil {
-		return Credential{}, name, err
+		return Credential{}, name, false, err
 	}
-	return cred, name, nil
+	return cred, name, true, nil
 }
 
 func shouldUsePreferredActiveProfile(paths ToolPaths, active Credential, preferredProfile string, pendingCreateProfile string) bool {
@@ -306,23 +303,6 @@ func shouldUsePreferredActiveProfile(paths ToolPaths, active Credential, preferr
 	}
 
 	return false
-}
-
-func guessActiveProfileName(paths ToolPaths, active Credential) string {
-	profiles, err := listProfiles(paths)
-	if err != nil {
-		return ""
-	}
-	for _, name := range profiles {
-		profileCred, loadErr := loadProfile(paths, name)
-		if loadErr != nil {
-			continue
-		}
-		if credentialsLikelyMatch(active, profileCred) {
-			return name
-		}
-	}
-	return ""
 }
 
 func credentialsLikelyMatch(a Credential, b Credential) bool {

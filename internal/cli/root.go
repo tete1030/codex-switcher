@@ -333,7 +333,7 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 				return app.WrapExit(app.ExitUserError, err)
 			}
 			if watch {
-				return watchUsage(cmd, svc, app.UsageOptions{Tools: selectedTools}, interval, selectedTools)
+				return watchUsage(cmd, svc, app.UsageOptions{Tools: selectedTools, ActiveOnly: true}, interval, selectedTools)
 			}
 
 			results, err := svc.Usage(app.UsageOptions{

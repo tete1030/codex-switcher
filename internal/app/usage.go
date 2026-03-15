@@ -27,6 +27,7 @@ type UsageOptions struct {
 	Profile     string
 	AllProfiles bool
 	Tools       []ToolName
+	ActiveOnly  bool
 }
 
 func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
@@ -43,7 +44,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 
 	httpClient := &http.Client{Timeout: defaultHTTPTimeout}
 	usageURL := firstNonEmpty(strings.TrimSpace(os.Getenv("CODEX_SWITCHER_USAGE_URL")), defaultUsageURL)
-	defaultActiveQuery := opts.Profile == "" && len(opts.Tools) == 0 && !opts.AllProfiles
+	defaultActiveQuery := opts.Profile == "" && !opts.AllProfiles && (len(opts.Tools) == 0 || opts.ActiveOnly)
 
 	results := make([]UsageResult, 0)
 	for _, tool := range tools {
@@ -247,6 +248,10 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 		return []string{opts.Profile}, nil
 	}
 
+	if opts.ActiveOnly {
+		return []string{"__active__"}, nil
+	}
+
 	if len(opts.Tools) > 0 {
 		list, err := listProfiles(paths)
 		if err != nil {
@@ -267,7 +272,7 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 }
 
 func shouldMaterializePendingUsageForScopedTools(opts UsageOptions, state StateFile) bool {
-	return opts.Profile == "" && len(opts.Tools) > 0 && !opts.AllProfiles && state.PendingCreateProfile != ""
+	return opts.Profile == "" && len(opts.Tools) > 0 && !opts.AllProfiles && !opts.ActiveOnly && state.PendingCreateProfile != ""
 }
 
 func materializePendingUsageProfile(client *http.Client, usageURL string, paths ToolPaths, adapter Adapter, state StateFile) (StateFile, error) {

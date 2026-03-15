@@ -268,6 +268,64 @@ func TestUsageWithExplicitToolsMaterializesPendingCreateProfileForOpenCodeWithou
 	}
 }
 
+func TestUsageWithExplicitToolsActiveOnlyShowsOnlyActiveProfile(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte(`{"plan_type":"plus","credits":{"balance":0},"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":1,"reset_at":1773000000},"secondary_window":{"limit_window_seconds":86400,"used_percent":2,"reset_at":1773086400}}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CODEX_SWITCHER_USAGE_URL", server.URL+"/backend-api/wham/usage")
+
+	paths, err := resolveToolPaths(ToolCodex)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	activeCred := Credential{Provider: "openai-codex", Access: "buy1-access", Refresh: "buy1-refresh", AccountID: "buy1-acct"}
+	if err := writeJSONAtomic(paths.ActivePath, map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]any{
+			"access_token":  activeCred.Access,
+			"refresh_token": activeCred.Refresh,
+			"account_id":    activeCred.AccountID,
+		},
+	}); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+
+	if err := saveProfile(paths, "buy1", activeCred, true); err != nil {
+		t.Fatalf("save buy1 profile: %v", err)
+	}
+	if err := saveProfile(paths, "my", Credential{Provider: "openai-codex", Access: "my-access", Refresh: "my-refresh", AccountID: "my-acct"}, true); err != nil {
+		t.Fatalf("save my profile: %v", err)
+	}
+	if err := saveState(paths, StateFile{Version: 1, ActiveProfile: "buy1", ActiveCredentialHash: credentialFingerprint(activeCred)}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	results, err := svc.Usage(UsageOptions{Tools: []ToolName{ToolCodex}, ActiveOnly: true})
+	if err != nil {
+		t.Fatalf("usage failed: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected exactly one active-only result, got %+v", results)
+	}
+	if results[0].Tool != ToolCodex || results[0].Profile != "buy1" || results[0].Status != "ok" {
+		t.Fatalf("expected only codex/buy1 active usage, got %+v", results)
+	}
+}
+
 func TestUsageAllProfilesDoesNotClearPendingCreateFromOtherProfileQuery(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

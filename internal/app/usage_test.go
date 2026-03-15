@@ -96,7 +96,7 @@ func TestUsageDefaultMaterializesPendingCreateProfile(t *testing.T) {
 	}
 }
 
-func TestUsageWithExplicitToolsMaterializesPendingCreateProfile(t *testing.T) {
+func TestUsageWithExplicitToolsMaterializesPendingCreateProfileAndPreservesSavedProfiles(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	codexHome := filepath.Join(home, ".codex")
@@ -150,13 +150,102 @@ func TestUsageWithExplicitToolsMaterializesPendingCreateProfile(t *testing.T) {
 	}
 
 	foundBuy1 := false
+	foundMy := false
 	for _, result := range results {
 		if result.Tool == ToolCodex && result.Profile == "buy1" && result.Status == "ok" {
 			foundBuy1 = true
 		}
+		if result.Tool == ToolCodex && result.Profile == "my" && result.Status == "ok" {
+			foundMy = true
+		}
 	}
 	if !foundBuy1 {
 		t.Fatalf("expected codex/buy1 usage result, got %+v", results)
+	}
+	if !foundMy {
+		t.Fatalf("expected codex/my usage result to remain visible, got %+v", results)
+	}
+
+	buy1, err := loadProfile(paths, "buy1")
+	if err != nil {
+		t.Fatalf("expected buy1 profile materialized, got err=%v", err)
+	}
+	if buy1.Access != "active-buy1-access" || buy1.Refresh != "active-buy1-refresh" || buy1.AccountID != "active-buy1-acct" {
+		t.Fatalf("expected buy1 profile synced from active auth, got %+v", buy1)
+	}
+
+	updatedState, err := loadState(paths)
+	if err != nil {
+		t.Fatalf("load updated state: %v", err)
+	}
+	if updatedState.PendingCreateProfile != "" {
+		t.Fatalf("expected pending create cleared, got %q", updatedState.PendingCreateProfile)
+	}
+	if updatedState.ActiveProfile != "buy1" {
+		t.Fatalf("expected active profile buy1, got %q", updatedState.ActiveProfile)
+	}
+}
+
+func TestUsageWithExplicitToolsMaterializesPendingCreateProfileForOpenCodeWithoutHidingSavedProfiles(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	xdgData := filepath.Join(home, ".local", "share")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", xdgData)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte(`{"plan_type":"plus","credits":{"balance":0},"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":1,"reset_at":1773000000},"secondary_window":{"limit_window_seconds":86400,"used_percent":2,"reset_at":1773086400}}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CODEX_SWITCHER_USAGE_URL", server.URL+"/backend-api/wham/usage")
+
+	paths, err := resolveToolPaths(ToolOpenCode)
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+
+	if err := writeJSONAtomic(paths.ActivePath, map[string]any{
+		"openai": map[string]any{
+			"type":      "oauth",
+			"access":    "active-buy1-access",
+			"refresh":   "active-buy1-refresh",
+			"accountId": "active-buy1-acct",
+		},
+	}); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+
+	if err := saveProfile(paths, "my", Credential{Provider: "openai-codex", Access: "my-access", Refresh: "my-refresh", AccountID: "my-acct"}, true); err != nil {
+		t.Fatalf("save my profile: %v", err)
+	}
+	if err := saveProfile(paths, "old2", Credential{Provider: "openai-codex", Access: "old2-access", Refresh: "old2-refresh", AccountID: "old2-acct"}, true); err != nil {
+		t.Fatalf("save old2 profile: %v", err)
+	}
+
+	if err := saveState(paths, StateFile{Version: 1, PreviousProfile: "my", PendingCreateProfile: "buy1", PendingCreateSince: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	svc := NewService()
+	results, err := svc.Usage(UsageOptions{Tools: []ToolName{ToolOpenCode}})
+	if err != nil {
+		t.Fatalf("usage failed: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, result := range results {
+		if result.Tool == ToolOpenCode && result.Status == "ok" {
+			found[result.Profile] = true
+		}
+	}
+	for _, name := range []string{"buy1", "my", "old2"} {
+		if !found[name] {
+			t.Fatalf("expected opencode/%s usage result, got %+v", name, results)
+		}
 	}
 
 	buy1, err := loadProfile(paths, "buy1")

@@ -43,7 +43,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 
 	httpClient := &http.Client{Timeout: defaultHTTPTimeout}
 	usageURL := firstNonEmpty(strings.TrimSpace(os.Getenv("CODEX_SWITCHER_USAGE_URL")), defaultUsageURL)
-	defaultActiveQuery := opts.Profile == "" && !opts.AllProfiles
+	defaultActiveQuery := opts.Profile == "" && len(opts.Tools) == 0 && !opts.AllProfiles
 
 	results := make([]UsageResult, 0)
 	for _, tool := range tools {
@@ -70,6 +70,21 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 			continue
 		}
 
+		state, _ := loadState(paths)
+		if shouldMaterializePendingUsageForScopedTools(opts, state) {
+			state, err = materializePendingUsageProfile(httpClient, usageURL, paths, adapter, state)
+			if err != nil {
+				results = append(results, UsageResult{
+					Tool:     tool,
+					Profile:  state.PendingCreateProfile,
+					Provider: "openai-codex",
+					Status:   "error",
+					Error:    err.Error(),
+				})
+				continue
+			}
+		}
+
 		profilesToLoad, selectErr := selectUsageProfilesForTool(opts, paths)
 		if selectErr != nil {
 			results = append(results, UsageResult{
@@ -92,7 +107,6 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 			continue
 		}
 
-		state, _ := loadState(paths)
 		hadSuccess := false
 		lastSuccessProfile := ""
 		resolvedPendingProfile := false
@@ -233,6 +247,14 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 		return []string{opts.Profile}, nil
 	}
 
+	if len(opts.Tools) > 0 {
+		list, err := listProfiles(paths)
+		if err != nil {
+			return nil, err
+		}
+		return list, nil
+	}
+
 	if opts.AllProfiles {
 		list, err := listProfiles(paths)
 		if err != nil {
@@ -242,6 +264,46 @@ func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, e
 	}
 
 	return []string{"__active__"}, nil
+}
+
+func shouldMaterializePendingUsageForScopedTools(opts UsageOptions, state StateFile) bool {
+	return opts.Profile == "" && len(opts.Tools) > 0 && !opts.AllProfiles && state.PendingCreateProfile != ""
+}
+
+func materializePendingUsageProfile(client *http.Client, usageURL string, paths ToolPaths, adapter Adapter, state StateFile) (StateFile, error) {
+	cred, sourceLabel, sourceVerified, err := resolveUsageCredential(paths, adapter, "__active__", state, true)
+	if err != nil {
+		return state, nil
+	}
+	if !sourceVerified || sourceLabel == unknownProfileName || sourceLabel != state.PendingCreateProfile {
+		return state, nil
+	}
+
+	_, newCred, refreshed, usageErr := fetchUsageWithRefresh(client, usageURL, cred)
+	if usageErr != nil {
+		return state, nil
+	}
+
+	synced := cred
+	if refreshed {
+		synced = newCred
+	}
+	if err := saveProfile(paths, sourceLabel, synced, true); err != nil {
+		return state, err
+	}
+	if refreshed {
+		if err := adapter.WriteActiveCredential(paths, newCred); err != nil {
+			return state, err
+		}
+	}
+
+	state.PendingCreateProfile = ""
+	state.PendingCreateSince = ""
+	setActiveProfileTracking(&state, sourceLabel, synced)
+	if err := saveState(paths, state); err != nil {
+		return state, err
+	}
+	return state, nil
 }
 
 func usageProfileLabel(name string) string {

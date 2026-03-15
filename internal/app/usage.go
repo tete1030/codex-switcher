@@ -43,7 +43,7 @@ func (s *Service) Usage(opts UsageOptions) ([]UsageResult, error) {
 
 	httpClient := &http.Client{Timeout: defaultHTTPTimeout}
 	usageURL := firstNonEmpty(strings.TrimSpace(os.Getenv("CODEX_SWITCHER_USAGE_URL")), defaultUsageURL)
-	defaultActiveQuery := opts.Profile == "" && len(opts.Tools) == 0 && !opts.AllProfiles
+	defaultActiveQuery := opts.Profile == "" && !opts.AllProfiles
 
 	results := make([]UsageResult, 0)
 	for _, tool := range tools {
@@ -231,14 +231,6 @@ func resolveUsageTools(selected []ToolName) ([]ToolName, error) {
 func selectUsageProfilesForTool(opts UsageOptions, paths ToolPaths) ([]string, error) {
 	if opts.Profile != "" {
 		return []string{opts.Profile}, nil
-	}
-
-	if len(opts.Tools) > 0 {
-		list, err := listProfiles(paths)
-		if err != nil {
-			return nil, err
-		}
-		return list, nil
 	}
 
 	if opts.AllProfiles {

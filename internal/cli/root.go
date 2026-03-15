@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -312,6 +313,8 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 	var allProfiles bool
 	var toolsCSV string
 	var jsonOut bool
+	var watch bool
+	var interval time.Duration
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Fetch usage for one or more profiles",
@@ -325,8 +328,16 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 				selectedTools = parsed
 			}
 
+			trimmedProfile := strings.TrimSpace(profile)
+			if err := validateUsageWatchOptions(watch, interval, selectedTools, trimmedProfile, allProfiles, jsonOut); err != nil {
+				return app.WrapExit(app.ExitUserError, err)
+			}
+			if watch {
+				return watchUsage(cmd, svc, app.UsageOptions{Tools: selectedTools}, interval, selectedTools)
+			}
+
 			results, err := svc.Usage(app.UsageOptions{
-				Profile:     strings.TrimSpace(profile),
+				Profile:     trimmedProfile,
 				AllProfiles: allProfiles,
 				Tools:       selectedTools,
 			})
@@ -336,87 +347,150 @@ func newUsageCommand(svc *app.Service) *cobra.Command {
 			if jsonOut {
 				return printJSON(results)
 			}
-
-			activeProfiles := map[app.ToolName]string{}
-			statusTools := selectedTools
-			if len(statusTools) == 0 {
-				statusTools = append([]app.ToolName{}, app.AllTools...)
-			}
-			if statusResults, statusErr := svc.Status(statusTools); statusErr == nil {
-				for _, item := range statusResults {
-					activeProfiles[item.Tool] = strings.TrimSpace(item.ActiveProfile)
-				}
-			}
-
-			toolCounts := usageToolResultCounts(results)
-			formatUsageLabel := func(item app.UsageResult) string {
-				return usageDisplayLabel(item, activeProfiles, toolCounts)
-			}
-
-			summary := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(summary, "profile\tplan\taccount\tcredits")
-			for _, item := range results {
-				label := formatUsageLabel(item)
-				plan := "N/A"
-				if item.Status == "ok" {
-					plan = zeroDefault(item.Plan, "unknown")
-				}
-				account := formatAccountForDisplay(item.AccountID)
-				credits := "-"
-				if item.Status == "ok" {
-					credits = formatCreditsForDisplay(item.CreditsBalance)
-				}
-				_, _ = fmt.Fprintf(summary, "%s\t%s\t%s\t%s\n", label, plan, account, credits)
-			}
-			_ = summary.Flush()
-
-			fmt.Println()
-
-			windows := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(windows, "profile\twindow\tused\treset(local)\tremaining")
-			for i, item := range results {
-				if i > 0 {
-					_, _ = fmt.Fprintln(windows, "----------\t------\t------\t---------------------\t----------------")
-				}
-
-				label := formatUsageLabel(item)
-				if item.Status != "ok" {
-					errText := strings.ReplaceAll(strings.TrimSpace(item.Error), "\n", " ")
-					if errText == "" {
-						errText = "unknown error"
-					}
-					_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t%s\n", label, errText)
-					continue
-				}
-
-				if len(item.Windows) == 0 {
-					_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t-\n", label)
-					continue
-				}
-
-				for wi, w := range item.Windows {
-					profileCell := ""
-					if wi == 0 {
-						profileCell = label
-					}
-					reset := "-"
-					remaining := "-"
-					if w.ResetAt > 0 {
-						reset = formatResetForDisplay(w.ResetAt)
-						remaining = formatRemainingForDisplay(w.ResetAt)
-					}
-					_, _ = fmt.Fprintf(windows, "%s\t%s\t%.1f%%\t%s\t%s\n", profileCell, w.Label, w.UsedPercent, reset, remaining)
-				}
-			}
-			_ = windows.Flush()
+			renderUsageReport(os.Stdout, results, loadUsageActiveProfiles(svc, selectedTools))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&profile, "profile", "", "Specific profile name")
 	cmd.Flags().BoolVar(&allProfiles, "all-profiles", false, "Query all profiles (for selected tool(s), or all tools if none selected)")
 	cmd.Flags().StringVar(&toolsCSV, "tools", "", "Comma-separated tools: codex,opencode,openclaw")
+	cmd.Flags().BoolVar(&watch, "watch", false, "Continuously watch active usage for selected tools")
+	cmd.Flags().DurationVar(&interval, "interval", 30*time.Second, "Watch polling interval (for example: 10s, 1m)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output JSON")
 	return cmd
+}
+
+func validateUsageWatchOptions(watch bool, interval time.Duration, selectedTools []app.ToolName, profile string, allProfiles bool, jsonOut bool) error {
+	if !watch {
+		return nil
+	}
+	if len(selectedTools) == 0 {
+		return fmt.Errorf("--watch requires --tools")
+	}
+	if profile != "" {
+		return fmt.Errorf("--watch cannot be combined with --profile")
+	}
+	if allProfiles {
+		return fmt.Errorf("--watch cannot be combined with --all-profiles")
+	}
+	if jsonOut {
+		return fmt.Errorf("--watch cannot be combined with --json")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("--interval must be greater than 0")
+	}
+	return nil
+}
+
+func watchUsage(cmd *cobra.Command, svc *app.Service, opts app.UsageOptions, interval time.Duration, selectedTools []app.ToolName) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		results, err := svc.Usage(opts)
+		if err != nil {
+			return err
+		}
+
+		resetUsageWatchScreen(os.Stdout)
+		_, _ = fmt.Fprintf(os.Stdout, "Watching active usage for %s (interval %s, updated %s)\n\n", strings.Join(toStrings(selectedTools), ","), interval, time.Now().Local().Format("2006-01-02 15:04:05 MST"))
+		renderUsageReport(os.Stdout, results, loadUsageActiveProfiles(svc, selectedTools))
+
+		select {
+		case <-cmd.Context().Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func resetUsageWatchScreen(out *os.File) {
+	info, err := out.Stat()
+	if err != nil {
+		return
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return
+	}
+	_, _ = fmt.Fprint(out, "\033[H\033[2J")
+}
+
+func loadUsageActiveProfiles(svc *app.Service, selectedTools []app.ToolName) map[app.ToolName]string {
+	activeProfiles := map[app.ToolName]string{}
+	statusTools := selectedTools
+	if len(statusTools) == 0 {
+		statusTools = append([]app.ToolName{}, app.AllTools...)
+	}
+	if statusResults, statusErr := svc.Status(statusTools); statusErr == nil {
+		for _, item := range statusResults {
+			activeProfiles[item.Tool] = strings.TrimSpace(item.ActiveProfile)
+		}
+	}
+	return activeProfiles
+}
+
+func renderUsageReport(w io.Writer, results []app.UsageResult, activeProfiles map[app.ToolName]string) {
+	toolCounts := usageToolResultCounts(results)
+	formatUsageLabel := func(item app.UsageResult) string {
+		return usageDisplayLabel(item, activeProfiles, toolCounts)
+	}
+
+	summary := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(summary, "profile\tplan\taccount\tcredits")
+	for _, item := range results {
+		label := formatUsageLabel(item)
+		plan := "N/A"
+		if item.Status == "ok" {
+			plan = zeroDefault(item.Plan, "unknown")
+		}
+		account := formatAccountForDisplay(item.AccountID)
+		credits := "-"
+		if item.Status == "ok" {
+			credits = formatCreditsForDisplay(item.CreditsBalance)
+		}
+		_, _ = fmt.Fprintf(summary, "%s\t%s\t%s\t%s\n", label, plan, account, credits)
+	}
+	_ = summary.Flush()
+
+	_, _ = fmt.Fprintln(w)
+
+	windows := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(windows, "profile\twindow\tused\treset(local)\tremaining")
+	for i, item := range results {
+		if i > 0 {
+			_, _ = fmt.Fprintln(windows, "----------\t------\t------\t---------------------\t----------------")
+		}
+
+		label := formatUsageLabel(item)
+		if item.Status != "ok" {
+			errText := strings.ReplaceAll(strings.TrimSpace(item.Error), "\n", " ")
+			if errText == "" {
+				errText = "unknown error"
+			}
+			_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t%s\n", label, errText)
+			continue
+		}
+
+		if len(item.Windows) == 0 {
+			_, _ = fmt.Fprintf(windows, "%s\t-\t-\t-\t-\n", label)
+			continue
+		}
+
+		for wi, window := range item.Windows {
+			profileCell := ""
+			if wi == 0 {
+				profileCell = label
+			}
+			reset := "-"
+			remaining := "-"
+			if window.ResetAt > 0 {
+				reset = formatResetForDisplay(window.ResetAt)
+				remaining = formatRemainingForDisplay(window.ResetAt)
+			}
+			_, _ = fmt.Fprintf(windows, "%s\t%s\t%.1f%%\t%s\t%s\n", profileCell, window.Label, window.UsedPercent, reset, remaining)
+		}
+	}
+	_ = windows.Flush()
 }
 
 func usageToolResultCounts(results []app.UsageResult) map[app.ToolName]int {
